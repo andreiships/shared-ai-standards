@@ -1,0 +1,86 @@
+name: 'Diff Cover Check'
+description: 'Enforce patch coverage threshold on changed lines using diff-cover'
+
+inputs:
+  threshold:
+    description: 'Coverage threshold percentage'
+    default: '80'
+  coverage-file:
+    description: 'Path to LCOV coverage file'
+    default: 'coverage/lcov.info'
+  compare-branch:
+    description: 'Git branch to diff against (e.g. origin/main)'
+    required: true
+  axiom-token:
+    description: 'Axiom API token for override telemetry (optional)'
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        cache: 'pip'
+        cache-dependency-path: '${{ github.action_path }}/requirements.txt'
+
+    - name: Install diff-cover
+      shell: bash
+      run: pip install -r "${{ github.action_path }}/requirements.txt"
+
+    - name: Run diff-cover
+      shell: bash
+      run: |
+        diff-cover "${{ inputs.coverage-file }}" \
+          --compare-branch="${{ inputs.compare-branch }}" \
+          --json-report coverage/diff-cover.json \
+          --html-report coverage/diff-cover.html || {
+          # diff-cover can crash when merged LCOV contains paths that Python's
+          # os.path.relpath() rejects (e.g. empty SF: entries from kcov). In that
+          # case diff-cover.json is never written. Write a crash-sentinel report
+          # so analyze-coverage-results FAILS the build rather than silently passing.
+          echo "::warning::diff-cover exited non-zero (possibly LCOV parse error); writing crash-sentinel coverage report"
+          mkdir -p coverage
+          echo '{"crash_fallback": true, "total_percent_covered": 0, "total_num_lines": 0, "total_num_lines_missed": 0, "src_stats": {}}' > coverage/diff-cover.json
+        }
+
+    - name: Analyze coverage results
+      uses: actions/github-script@v7
+      env:
+        AXIOM_TOKEN: ${{ inputs.axiom-token }}
+        COVERAGE_THRESHOLD: ${{ inputs.threshold }}
+        ACTION_PATH: ${{ github.action_path }}
+      with:
+        script: |
+          const { analyzeCoverageResults, sendTelemetry } = await import(process.env.ACTION_PATH + '/analyze-coverage-results.mjs');
+          const threshold = parseInt(process.env.COVERAGE_THRESHOLD, 10);
+          const result = await analyzeCoverageResults({
+            reportPath: 'coverage/diff-cover.json',
+            threshold,
+            context,
+            github
+          });
+          core.notice(`Patch Coverage: ${result.coveragePercent}%`);
+          if (result.overrideApplied) {
+            core.warning(`Coverage override applied (${result.coveragePercent}% < ${threshold}%)`);
+          }
+          if (result.telemetryEvents.length > 0) {
+            await sendTelemetry({
+              events: result.telemetryEvents,
+              axiomToken: process.env.AXIOM_TOKEN,
+              context,
+              core
+            });
+          }
+          if (result.shouldFail) {
+            core.setFailed(result.reason);
+          }
+
+    - name: Upload diff-cover report
+      if: always() && hashFiles('coverage/diff-cover.html') != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: diff-cover-report
+        path: coverage/diff-cover.html
+        retention-days: 7
