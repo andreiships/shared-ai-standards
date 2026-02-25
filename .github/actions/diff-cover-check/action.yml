@@ -38,30 +38,32 @@ runs:
           --html-report coverage/diff-cover.html || {
           # diff-cover can crash when merged LCOV contains paths that Python's
           # os.path.relpath() rejects (e.g. empty SF: entries from kcov). In that
-          # case diff-cover.json is never written. Write a vacuously-correct fallback
-          # (0 diff lines → 100% covered) so analyze-coverage-results can distinguish
-          # a crash from a real below-threshold result.
-          echo "::warning::diff-cover exited non-zero (possibly LCOV parse error); writing fallback coverage report"
+          # case diff-cover.json is never written. Write a crash-sentinel report
+          # so analyze-coverage-results FAILS the build rather than silently passing.
+          echo "::warning::diff-cover exited non-zero (possibly LCOV parse error); writing crash-sentinel coverage report"
           mkdir -p coverage
-          echo '{"total_percent_covered": 100, "total_num_lines": 0, "total_num_lines_missed": 0, "src_stats": {}}' > coverage/diff-cover.json
+          echo '{"crash_fallback": true, "total_percent_covered": 0, "total_num_lines": 0, "total_num_lines_missed": 0, "src_stats": {}}' > coverage/diff-cover.json
         }
 
     - name: Analyze coverage results
       uses: actions/github-script@v7
       env:
         AXIOM_TOKEN: ${{ inputs.axiom-token }}
+        COVERAGE_THRESHOLD: ${{ inputs.threshold }}
+        ACTION_PATH: ${{ github.action_path }}
       with:
         script: |
-          const { analyzeCoverageResults, sendTelemetry } = await import('${{ github.action_path }}/analyze-coverage-results.mjs');
+          const { analyzeCoverageResults, sendTelemetry } = await import(process.env.ACTION_PATH + '/analyze-coverage-results.mjs');
+          const threshold = parseInt(process.env.COVERAGE_THRESHOLD, 10);
           const result = await analyzeCoverageResults({
             reportPath: 'coverage/diff-cover.json',
-            threshold: parseInt('${{ inputs.threshold }}', 10),
+            threshold,
             context,
             github
           });
           core.notice(`Patch Coverage: ${result.coveragePercent}%`);
           if (result.overrideApplied) {
-            core.warning(`Coverage override applied (${result.coveragePercent}% < ${{ inputs.threshold }}%)`);
+            core.warning(`Coverage override applied (${result.coveragePercent}% < ${threshold}%)`);
           }
           if (result.telemetryEvents.length > 0) {
             await sendTelemetry({

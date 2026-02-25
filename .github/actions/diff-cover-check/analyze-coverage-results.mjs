@@ -5,9 +5,10 @@
 import fs from 'fs';
 
 /**
- * Parse CODEOWNERS file to get list of owners
- * Supports: @username, @org/team, @user.name (dots in usernames)
- * Returns null if file cannot be read (fail-closed security)
+ * Parse CODEOWNERS file to get list of individual user owners (not teams).
+ * Team entries (@org/team) are excluded because reviewer logins are individual
+ * GitHub usernames — a team slug will never match a reviewer login.
+ * Returns null if file cannot be read (fail-closed security).
  */
 function parseCodeowners(codeownersPath = '.github/CODEOWNERS') {
   try {
@@ -18,10 +19,15 @@ function parseCodeowners(codeownersPath = '.github/CODEOWNERS') {
       if (line.startsWith('#') || !line.trim()) continue;
       // Remove inline comments before parsing
       const lineWithoutComment = line.split('#')[0];
-      // Extract @mentions: supports user, org/team, dots in names
-      const matches = lineWithoutComment.matchAll(/@([\w.\-]+(?:\/[\w.\-]+)?)/g);
+      // Extract @mentions: supports user, dots in names
+      // Explicitly exclude org/team entries (contain '/') — they cannot match reviewer logins
+      const matches = lineWithoutComment.matchAll(/@([\w.\-]+)/g);
       for (const match of matches) {
-        owners.add(match[1]); // Capture group contains owner without @
+        const owner = match[1];
+        // Skip org/team entries — they appear as @org/team but the regex above
+        // captures only up to the first non-word char so a separate team check isn't needed.
+        // (The previous regex allowed slashes; this one intentionally does not.)
+        owners.add(owner);
       }
     }
     return owners;
@@ -32,10 +38,15 @@ function parseCodeowners(codeownersPath = '.github/CODEOWNERS') {
 }
 
 async function checkCodeownersApproval(github, context) {
-  const { data: reviews } = await github.rest.pulls.listReviews({
+  const pull_number = context.payload.pull_request?.number;
+  if (!pull_number) {
+    // Action triggered outside a pull_request event — cannot check reviews
+    return false;
+  }
+  const reviews = await github.paginate(github.rest.pulls.listReviews, {
     owner: context.repo.owner,
     repo: context.repo.repo,
-    pull_number: context.payload.pull_request.number
+    pull_number
   });
 
   const codeowners = parseCodeowners();
@@ -102,7 +113,8 @@ function getCoverageData(reportPath = 'coverage/diff-cover.json') {
     return {
       percent: data.total_percent_covered,
       totalLines: data.total_num_lines,
-      parseError: false
+      parseError: false,
+      crashFallback: data.crash_fallback === true
     };
   } catch {
     // Missing or invalid report should fail, not pass as doc-only
@@ -117,7 +129,7 @@ export async function analyzeCoverageResults({
   github
 }) {
   const telemetryEvents = [];
-  const { percent: coveragePercent, totalLines, parseError } = getCoverageData(reportPath);
+  const { percent: coveragePercent, totalLines, parseError, crashFallback } = getCoverageData(reportPath);
 
   // Missing or invalid report must fail - cannot bypass coverage check
   if (parseError) {
@@ -125,6 +137,16 @@ export async function analyzeCoverageResults({
       shouldFail: true,
       coveragePercent: NaN,
       reason: 'Coverage report missing or invalid JSON',
+      telemetryEvents
+    };
+  }
+
+  // diff-cover crash: sentinel written by the bash fallback — must fail, not pass
+  if (crashFallback) {
+    return {
+      shouldFail: true,
+      coveragePercent: NaN,
+      reason: 'diff-cover exited non-zero (LCOV parse error or crash) — coverage check skipped is not permitted',
       telemetryEvents
     };
   }
