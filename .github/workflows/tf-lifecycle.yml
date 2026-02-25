@@ -1,0 +1,402 @@
+name: Terraform Lifecycle (Reusable)
+
+# ⚠️ IMPORTANT: Do NOT add a `concurrency` block here!
+# Concurrency must be defined in CALLER workflows (per-module groups).
+# Adding concurrency here would serialize ALL Terraform runs across
+# all modules, causing unnecessary delays and potential timeouts.
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: 'Terraform module directory'
+        required: true
+        type: string
+      comment_marker:
+        description: 'PR comment marker (can include HTML comments for hidden markers)'
+        required: true
+        type: string
+      module_name:
+        description: 'Display name for the module (e.g., cloudflare-workers)'
+        required: true
+        type: string
+      enable_collapse:
+        description: 'Enable collapse for code-only changes'
+        required: false
+        type: boolean
+        default: false
+      pre_plan_script:
+        description: 'Optional script to run before plan (before Terraform setup)'
+        required: false
+        type: string
+        default: ''
+      post_setup_script:
+        description: 'Optional script to run after Terraform setup (after init, before plan)'
+        required: false
+        type: string
+        default: ''
+      pre_apply_script:
+        description: 'Optional script to run before apply'
+        required: false
+        type: string
+        default: ''
+      plan_environment:
+        description: 'GitHub Environment for plan job (optional, for environment-scoped secrets)'
+        required: false
+        type: string
+        default: ''
+      environment:
+        description: 'GitHub Environment for apply job'
+        required: false
+        type: string
+        default: 'production'
+      build_artifact_name:
+        description: 'Name of build artifact to download (for workflows with pre-build jobs)'
+        required: false
+        type: string
+        default: ''
+      build_artifact_path:
+        description: 'Path to extract build artifact to (defaults to workspace root)'
+        required: false
+        type: string
+        default: ''
+      caller_event_name:
+        description: 'Event that triggered the caller workflow (for apply gating)'
+        required: false
+        type: string
+        default: 'push'
+      gcp_wif_provider:
+        description: 'GCP Workload Identity Provider (repository variable)'
+        required: true
+        type: string
+      gcp_wif_service_account:
+        description: 'GCP Service Account for WIF (repository variable)'
+        required: true
+        type: string
+      apply_branch:
+        description: 'Branch that triggers apply (default: main)'
+        required: false
+        type: string
+        default: 'main'
+    secrets:
+      cloudflare_api_token:
+        required: false  # Not needed by all modules (e.g., observability)
+      plan_encryption_key:
+        required: true
+      # Module-specific secrets passed through
+      additional_tf_vars:
+        required: false
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 10
+    # Optional environment for accessing environment-scoped secrets
+    environment: ${{ inputs.plan_environment }}
+
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+
+    outputs:
+      exitcode: ${{ steps.plan.outputs.exitcode }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        if: inputs.build_artifact_name != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.build_artifact_name }}
+          path: ${{ inputs.build_artifact_path }}
+
+      - name: Inject additional TF vars
+        env:
+          ADDITIONAL_VARS: ${{ secrets.additional_tf_vars }}
+        run: |
+          # Mask each secret value before adding to GITHUB_ENV
+          while IFS='=' read -r key value; do
+            [ -z "$key" ] && continue
+            # Mask the value so it won't appear in logs
+            echo "::add-mask::$value"
+            echo "$key=$value" >> "$GITHUB_ENV"
+          done <<< "$ADDITIONAL_VARS"
+
+      - name: Run pre-plan script
+        if: inputs.pre_plan_script != ''
+        run: ${{ inputs.pre_plan_script }}
+
+      - uses: andreiships/shared-ai-standards/.github/actions/setup-terraform@main
+        with:
+          gcp_wif_provider: ${{ inputs.gcp_wif_provider }}
+          gcp_wif_service_account: ${{ inputs.gcp_wif_service_account }}
+          working_directory: ${{ inputs.working_directory }}
+
+      - name: Run post-setup script
+        if: inputs.post_setup_script != ''
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          CALLER_EVENT_NAME: ${{ inputs.caller_event_name }}
+        run: ${{ inputs.post_setup_script }}
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.cloudflare_api_token }}
+        run: |
+          set -o pipefail
+          set +e  # Disable exit-on-error to capture terraform exitcode 2 (changes present)
+          terraform plan -input=false -no-color -detailed-exitcode -out=tfplan.binary 2>&1 | tee plan.txt
+          exitcode=$?
+          set -e  # Re-enable exit-on-error
+          echo "exitcode=$exitcode" >> "$GITHUB_OUTPUT"
+          # Fail on any error except exitcode 2 (changes present)
+          if [ "$exitcode" -ne 0 ] && [ "$exitcode" -ne 2 ]; then exit "$exitcode"; fi
+        continue-on-error: true
+
+      - name: Encrypt plan artifact
+        if: steps.plan.outputs.exitcode == '2'
+        env:
+          PLAN_ENCRYPTION_KEY: ${{ secrets.plan_encryption_key }}
+        run: |
+          gpg --symmetric --batch --pinentry-mode loopback \
+            --passphrase "$PLAN_ENCRYPTION_KEY" \
+            --cipher-algo AES256 \
+            -o tfplan.gpg tfplan.binary
+        working-directory: ${{ inputs.working_directory }}
+
+      - name: Upload encrypted plan
+        if: steps.plan.outputs.exitcode == '2'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ inputs.module_name }}
+          path: ${{ inputs.working_directory }}/tfplan.gpg
+          retention-days: 1
+
+      - uses: andreiships/shared-ai-standards/.github/actions/tf-plan-comment@main
+        # Note: Action has internal guard for PR context (checks context.issue.number)
+        # In reusable workflows, event_name is 'workflow_call', not 'pull_request'
+        with:
+          plan_file_path: ${{ inputs.working_directory }}/plan.txt
+          exitcode: ${{ steps.plan.outputs.exitcode }}
+          marker: ${{ inputs.comment_marker }}
+          module_name: ${{ inputs.module_name }}
+          enable_collapse: ${{ inputs.enable_collapse }}
+          github_token: ${{ github.token }}
+
+      - name: Check for errors
+        # Fail if exitcode is not 0 (no changes) or 2 (changes present)
+        if: steps.plan.outputs.exitcode != '0' && steps.plan.outputs.exitcode != '2'
+        run: exit 1
+
+  apply:
+    name: Apply
+    needs: plan
+    # Note: event_name is always 'workflow_call' in reusable workflows
+    # Caller passes their event via caller_event_name input for apply gating
+    if: github.ref == format('refs/heads/{0}', inputs.apply_branch) && needs.plan.outputs.exitcode == '2' && (inputs.caller_event_name == 'push' || inputs.caller_event_name == 'workflow_dispatch')
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 10
+    environment: ${{ inputs.environment }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        if: inputs.build_artifact_name != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.build_artifact_name }}
+          path: ${{ inputs.build_artifact_path }}
+
+      - name: Inject additional TF vars
+        env:
+          ADDITIONAL_VARS: ${{ secrets.additional_tf_vars }}
+        run: |
+          # Mask each secret value before adding to GITHUB_ENV
+          while IFS='=' read -r key value; do
+            [ -z "$key" ] && continue
+            # Mask the value so it won't appear in logs
+            echo "::add-mask::$value"
+            echo "$key=$value" >> "$GITHUB_ENV"
+          done <<< "$ADDITIONAL_VARS"
+
+      - name: Run pre-apply script
+        if: inputs.pre_apply_script != ''
+        run: ${{ inputs.pre_apply_script }}
+
+      - uses: andreiships/shared-ai-standards/.github/actions/setup-terraform@main
+        with:
+          gcp_wif_provider: ${{ inputs.gcp_wif_provider }}
+          gcp_wif_service_account: ${{ inputs.gcp_wif_service_account }}
+          working_directory: ${{ inputs.working_directory }}
+
+      - name: Run post-setup script
+        if: inputs.post_setup_script != ''
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          CALLER_EVENT_NAME: ${{ inputs.caller_event_name }}
+        run: ${{ inputs.post_setup_script }}
+
+      - name: Download encrypted plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ inputs.module_name }}
+          path: ${{ inputs.working_directory }}
+
+      - name: Decrypt plan
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          PLAN_ENCRYPTION_KEY: ${{ secrets.plan_encryption_key }}
+        run: |
+          gpg --decrypt --batch --pinentry-mode loopback \
+            --passphrase "$PLAN_ENCRYPTION_KEY" \
+            -o tfplan.binary tfplan.gpg
+
+      - name: Terraform Apply
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          TF_VAR_cloudflare_api_token: ${{ secrets.cloudflare_api_token }}
+        run: terraform apply -input=false tfplan.binary
+
+  notify-on-failure:
+    name: Notify Failure
+    needs: [plan, apply]
+    if: always() && github.ref == format('refs/heads/{0}', inputs.apply_branch) && (needs.plan.result == 'failure' || needs.apply.result == 'failure')
+    runs-on: ubicloud-standard-2
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          MODULE_NAME: ${{ inputs.module_name }}
+          WORKFLOW: ${{ github.workflow }}
+          RUN_NUMBER: ${{ github.run_number }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          APPLY_RESULT: ${{ needs.apply.result }}
+        with:
+          script: |
+            const planFailed = process.env.PLAN_RESULT === 'failure';
+            const applyFailed = process.env.APPLY_RESULT === 'failure';
+            const failedStage = planFailed ? 'plan' : 'apply';
+
+            const stageName = failedStage.charAt(0).toUpperCase() + failedStage.slice(1);
+            const moduleName = process.env.MODULE_NAME;
+            const title = `🚨 Terraform ${stageName} failed: ${moduleName}`;
+            const runUrl = `${process.env.SERVER_URL}/${process.env.REPOSITORY}/actions/runs/${process.env.RUN_ID}`;
+            const commitUrl = `${process.env.SERVER_URL}/${process.env.REPOSITORY}/commit/${process.env.SHA}`;
+            const body = `## Terraform ${stageName} Failed\n\n` +
+              `**Module**: ${moduleName}\n` +
+              `**Workflow**: ${process.env.WORKFLOW}\n` +
+              `**Run**: [#${process.env.RUN_NUMBER}](${runUrl})\n` +
+              `**Commit**: [${process.env.SHA.substring(0, 7)}](${commitUrl})\n` +
+              `**Triggered by**: @${process.env.ACTOR}\n\n` +
+              `### Next Steps\n` +
+              `1. Check the [workflow logs](${runUrl})\n` +
+              `2. Fix the issue and push a new commit\n` +
+              `3. Issue will auto-close when next run succeeds\n\n` +
+              `---\n` +
+              `*Auto-generated by terraform failure notification*`;
+
+            // Check for existing open issue for this module
+            const { data: existingIssues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'terraform-failure',
+            });
+
+            const existingIssue = existingIssues.find(i =>
+              i.title === `🚨 Terraform Plan failed: ${moduleName}` ||
+              i.title === `🚨 Terraform Apply failed: ${moduleName}` ||
+              i.title === `🚨 Terraform plan failed: ${moduleName}` ||
+              i.title === `🚨 Terraform apply failed: ${moduleName}`
+            );
+
+            if (existingIssue) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existingIssue.number,
+                body: `❌ Another ${failedStage} failed in [run #${process.env.RUN_NUMBER}](${runUrl})`
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['terraform-failure', 'infrastructure']
+              });
+            }
+
+  auto-close-on-success:
+    name: Auto-close Failure Issues
+    needs: [plan, apply]
+    if: always() && github.ref == format('refs/heads/{0}', inputs.apply_branch) && (needs.apply.result == 'success' || (needs.plan.outputs.exitcode == '0' && needs.apply.result == 'skipped'))
+    runs-on: ubicloud-standard-2
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          MODULE_NAME: ${{ inputs.module_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          APPLY_RESULT: ${{ needs.apply.result }}
+          PLAN_EXITCODE: ${{ needs.plan.outputs.exitcode }}
+        with:
+          script: |
+            const applySucceeded = process.env.APPLY_RESULT === 'success';
+            const noChanges = process.env.PLAN_EXITCODE === '0' && process.env.APPLY_RESULT === 'skipped';
+            const runUrl = `${process.env.SERVER_URL}/${process.env.REPOSITORY}/actions/runs/${process.env.RUN_ID}`;
+
+            const resolutionMessage = applySucceeded
+              ? `✅ Resolved by successful terraform apply in [run #${process.env.RUN_NUMBER}](${runUrl})`
+              : `✅ Resolved by successful terraform run (no changes detected) in [run #${process.env.RUN_NUMBER}](${runUrl})`;
+
+            // Find open terraform-failure issues for this module
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'terraform-failure',
+            });
+
+            const moduleName = process.env.MODULE_NAME;
+            const moduleIssues = issues.filter(i =>
+              i.title === `🚨 Terraform Plan failed: ${moduleName}` ||
+              i.title === `🚨 Terraform Apply failed: ${moduleName}` ||
+              i.title === `🚨 Terraform plan failed: ${moduleName}` ||
+              i.title === `🚨 Terraform apply failed: ${moduleName}`
+            );
+
+            for (const issue of moduleIssues) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: resolutionMessage
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed'
+              });
+            }

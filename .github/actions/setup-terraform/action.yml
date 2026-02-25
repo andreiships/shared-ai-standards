@@ -1,0 +1,45 @@
+name: 'Setup Terraform with GCP Auth'
+description: 'Install Terraform and authenticate via GCP Workload Identity Federation'
+
+inputs:
+  terraform_version:
+    description: 'Terraform version to install'
+    required: false
+    default: 'latest'
+  gcp_wif_provider:
+    description: 'GCP Workload Identity Provider'
+    required: true
+  gcp_wif_service_account:
+    description: 'GCP Service Account for WIF'
+    required: true
+  working_directory:
+    description: 'Terraform working directory for init'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Auth to Google Cloud (WIF)
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: ${{ inputs.gcp_wif_provider }}
+        service_account: ${{ inputs.gcp_wif_service_account }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ inputs.terraform_version }}
+        terraform_wrapper: false
+
+    - name: Cache Terraform providers
+      uses: actions/cache@v4
+      with:
+        path: ${{ inputs.working_directory }}/.terraform/providers
+        key: tf-providers-${{ inputs.working_directory }}-${{ hashFiles(format('{0}/versions.tf', inputs.working_directory), format('{0}/.terraform.lock.hcl', inputs.working_directory)) }}
+        restore-keys: |
+          tf-providers-${{ inputs.working_directory }}-
+
+    - name: Terraform Init
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: terraform init -input=false
