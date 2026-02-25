@@ -1,0 +1,16 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubicloud-standard-2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate ai-rulez config
+        run: npx ai-rulez@3.6.1 validate
