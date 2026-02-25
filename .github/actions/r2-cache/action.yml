@@ -1,0 +1,221 @@
+name: 'R2 Cache'
+description: 'Restore and save CI caches via Cloudflare R2 (turbo-cache worker v1 API)'
+
+inputs:
+  action:
+    description: 'Cache operation: restore or save'
+    required: true
+  key:
+    description: 'Exact cache key'
+    required: true
+  restore-keys:
+    description: 'Newline-separated prefix keys for fallback restore'
+    required: false
+    default: ''
+  path:
+    description: 'Newline-separated glob patterns of paths to cache'
+    required: true
+  cache-token:
+    description: 'Bearer token for R2 cache API'
+    required: true
+  cache-api:
+    description: 'Base URL for the R2 cache API'
+    required: false
+    default: 'https://cache.pistachiorama.ai'
+  axiom-token:
+    description: 'Axiom API token for telemetry (optional, skipped if empty)'
+    required: false
+    default: ''
+
+outputs:
+  cache-hit:
+    description: 'Whether an exact or prefix cache hit occurred'
+    value: ${{ steps.restore.outputs.cache-hit || 'false' }}
+  matched-key:
+    description: 'The actual cache key that was restored (may differ from input key on prefix match)'
+    value: ${{ steps.restore.outputs.matched-key || '' }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Restore cache from R2
+      if: inputs.action == 'restore'
+      id: restore
+      shell: bash
+      env:
+        CACHE_KEY: ${{ inputs.key }}
+        RESTORE_KEYS: ${{ inputs.restore-keys }}
+        CACHE_TOKEN: ${{ inputs.cache-token }}
+        CACHE_API: ${{ inputs.cache-api }}
+        AXIOM_TOKEN: ${{ inputs.axiom-token }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        TMPFILE=$(mktemp)
+        trap 'rm -f "$TMPFILE" "$TMPFILE.headers"' EXIT
+
+        # Source retry helper (bundled with action)
+        source "${ACTION_PATH}/curl-retry.sh"
+
+        # Telemetry helpers (fail-soft — callers can source their own metrics script before this action)
+        _emit() { command -v emit_r2_cache_event >/dev/null 2>&1 && emit_r2_cache_event "$@" || true; }
+        _millis() { command -v get_millis >/dev/null 2>&1 && get_millis || python3 -c 'import time; print(int(time.time() * 1000))' || echo 0; }
+
+        # Start timing
+        T_START=$(_millis)
+        LAST_HTTP=0
+        ERROR_HTTP=0  # Track worst non-404 error across all attempts
+
+        # Try exact key first (HEAD to check, then GET to download)
+        HTTP_CODE=$(curl_with_retry -sS -o /dev/null -w "%{http_code}" \
+          -H "Authorization: Bearer $CACHE_TOKEN" \
+          "$CACHE_API/v1/cache/$CACHE_KEY" --head) || true
+        HTTP_CODE="${HTTP_CODE:-000}"
+        LAST_HTTP=$HTTP_CODE
+        [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "404" ] && ERROR_HTTP=$HTTP_CODE
+
+        if [ "$HTTP_CODE" = "200" ]; then
+          echo "Cache hit (exact): $CACHE_KEY"
+          CURL_EXIT=0
+          curl_with_retry -sS -H "Authorization: Bearer $CACHE_TOKEN" \
+            "$CACHE_API/v1/cache/$CACHE_KEY" -o "$TMPFILE" || CURL_EXIT=$?
+          # Detect if archive contains absolute paths (tar strips leading /, so
+          # entries look like "home/runner/..." rather than workspace-relative).
+          # Use -C / for absolute-path archives so they restore to the correct location.
+          FIRST_ENTRY=$(tar tz < "$TMPFILE" 2>/dev/null | head -1 || true)
+          TAR_ROOT_FLAG=""
+          case "$FIRST_ENTRY" in
+            home/*|root/*|usr/*|opt/*|var/*|tmp/*)
+              TAR_ROOT_FLAG="-C /"
+              ;;
+          esac
+          # shellcheck disable=SC2086
+          if [ "$CURL_EXIT" -eq 0 ] && tar xz $TAR_ROOT_FLAG < "$TMPFILE"; then
+            _emit "r2_cache_restore" "$CACHE_KEY" 200 $(( $(_millis) - T_START )) "$CACHE_KEY"
+            echo "cache-hit=true" >> "$GITHUB_OUTPUT"
+            echo "matched-key=$CACHE_KEY" >> "$GITHUB_OUTPUT"
+            exit 0
+          else
+            _emit "r2_cache_error" "$CACHE_KEY" 200 $(( $(_millis) - T_START )) "$CACHE_KEY"
+            echo "::warning::Cache extraction failed for $CACHE_KEY"
+            exit 1
+          fi
+        fi
+
+        # Try prefix keys (single request per prefix: save to file, then extract)
+        while IFS= read -r prefix; do
+          prefix=$(echo "$prefix" | xargs)  # trim whitespace
+          [ -z "$prefix" ] && continue
+
+          HTTP_CODE=$(curl_with_retry -sS -D "$TMPFILE.headers" -o "$TMPFILE" -w "%{http_code}" \
+            -H "Authorization: Bearer $CACHE_TOKEN" \
+            "$CACHE_API/v1/cache/$prefix?prefix=true") || true
+          HTTP_CODE="${HTTP_CODE:-000}"
+          LAST_HTTP=$HTTP_CODE
+          [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "404" ] && ERROR_HTTP=$HTTP_CODE
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            MATCHED=$(grep -i 'x-cache-key' "$TMPFILE.headers" | tr -d '\r' | cut -d' ' -f2- || echo "$prefix")
+            echo "Cache hit (prefix): ${MATCHED}"
+            FIRST_ENTRY=$(tar tz < "$TMPFILE" 2>/dev/null | head -1 || true)
+            TAR_ROOT_FLAG=""
+            case "$FIRST_ENTRY" in
+              home/*|root/*|usr/*|opt/*|var/*|tmp/*)
+                TAR_ROOT_FLAG="-C /"
+                ;;
+            esac
+            # shellcheck disable=SC2086
+            if tar xz $TAR_ROOT_FLAG < "$TMPFILE"; then
+              _emit "r2_cache_restore" "$CACHE_KEY" 200 $(( $(_millis) - T_START )) "$MATCHED"
+              echo "cache-hit=true" >> "$GITHUB_OUTPUT"
+              echo "matched-key=${MATCHED}" >> "$GITHUB_OUTPUT"
+              rm -f "$TMPFILE.headers"
+              exit 0
+            else
+              _emit "r2_cache_error" "$CACHE_KEY" 200 $(( $(_millis) - T_START )) "$MATCHED"
+              rm -f "$TMPFILE.headers"
+              echo "::warning::Cache extraction failed for prefix ${MATCHED}"
+              exit 1
+            fi
+          fi
+          rm -f "$TMPFILE.headers"
+        done <<< "$RESTORE_KEYS"
+
+        # Distinguish true miss (all 404s) from error (any non-404 seen)
+        if [ "$ERROR_HTTP" != "0" ]; then
+          _emit "r2_cache_error" "$CACHE_KEY" "$ERROR_HTTP" $(( $(_millis) - T_START ))
+        else
+          _emit "r2_cache_miss" "$CACHE_KEY" "${LAST_HTTP:-404}" $(( $(_millis) - T_START ))
+        fi
+        echo "Cache miss"
+        echo "cache-hit=false" >> "$GITHUB_OUTPUT"
+
+    - name: Save cache to R2
+      if: inputs.action == 'save'
+      shell: bash
+      env:
+        CACHE_KEY: ${{ inputs.key }}
+        CACHE_PATH: ${{ inputs.path }}
+        CACHE_TOKEN: ${{ inputs.cache-token }}
+        CACHE_API: ${{ inputs.cache-api }}
+        AXIOM_TOKEN: ${{ inputs.axiom-token }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        shopt -s globstar nullglob
+
+        # Source retry helper (bundled with action)
+        source "${ACTION_PATH}/curl-retry.sh"
+
+        # Telemetry helpers (fail-soft — callers can source their own metrics script before this action)
+        _emit() { command -v emit_r2_cache_event >/dev/null 2>&1 && emit_r2_cache_event "$@" || true; }
+        _millis() { command -v get_millis >/dev/null 2>&1 && get_millis || python3 -c 'import time; print(int(time.time() * 1000))' || echo 0; }
+
+        # Expand glob patterns and collect matching paths (files and dirs)
+        PATHS=()
+        while IFS= read -r pattern; do
+          pattern=$(echo "$pattern" | xargs)
+          [ -z "$pattern" ] && continue
+          # Expand leading ~ to $HOME (bash does not expand ~ in variable references)
+          pattern="${pattern/#\~/$HOME}"
+          # Strip trailing slash for globbing
+          pattern="${pattern%/}"
+          # Use bash globstar to expand ** patterns; tar handles dir recursion
+          for match in $pattern; do
+            [ -e "$match" ] && PATHS+=("$match")
+          done
+        done <<< "$CACHE_PATH"
+
+        if [ ${#PATHS[@]} -eq 0 ]; then
+          echo "No files found matching patterns, skipping save"
+          _emit "r2_cache_skip" "$CACHE_KEY" 0 0
+          exit 0
+        fi
+
+        echo "Saving ${#PATHS[@]} paths to R2 key: $CACHE_KEY"
+
+        # Start timing
+        T_START=$(_millis)
+
+        # Buffer tar to temp file so curl_with_retry can replay on transient failures.
+        # Streaming tar|curl cannot be retried (partial body corrupts the upload).
+        TMPTAR=$(mktemp)
+        trap 'rm -f "$TMPTAR"' EXIT
+        tar czf "$TMPTAR" "${PATHS[@]}"
+
+        # Upload with retry; non-zero exit is handled below (save is best-effort)
+        CURL_EXIT=0
+        HTTP_CODE=$(curl_with_retry -sS -X PUT -o /dev/null -w "%{http_code}" \
+          -H "Authorization: Bearer $CACHE_TOKEN" \
+          -H "Content-Type: application/gzip" \
+          --data-binary "@$TMPTAR" \
+          "$CACHE_API/v1/cache/$CACHE_KEY") || CURL_EXIT=$?
+        HTTP_CODE="${HTTP_CODE:-000}"
+
+        if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+          echo "Cache saved successfully (HTTP $HTTP_CODE)"
+          _emit "r2_cache_save" "$CACHE_KEY" "$HTTP_CODE" $(( $(_millis) - T_START ))
+        else
+          echo "::warning::Cache save failed (HTTP $HTTP_CODE)"
+          _emit "r2_cache_error" "$CACHE_KEY" "$HTTP_CODE" $(( $(_millis) - T_START ))
+        fi
