@@ -1,0 +1,112 @@
+name: 'PR Validation'
+description: 'Validate PR title (conventional commits) and description (required sections)'
+
+inputs:
+  title-types:
+    description: 'Comma-separated allowed conventional commit types'
+    default: 'feat,fix,docs,chore,refactor,test,ci,perf,style,build,revert'
+  title-pattern:
+    description: 'Override regex for title validation (must have named group "type")'
+    default: ''
+  required-sections:
+    description: 'Comma-separated required heading sections (e.g. "## Summary,## Changes")'
+    default: ''
+  target-branch:
+    description: 'Required base branch (e.g. "main"). Empty = skip check.'
+    default: ''
+  skip-users:
+    description: 'Comma-separated GitHub usernames to skip all checks for'
+    default: ''
+  skip-description-branches:
+    description: 'Comma-separated branch prefixes to skip description validation (e.g. "research/")'
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Validate PR
+      uses: actions/github-script@v7
+      env:
+        INPUT_TITLE_TYPES: ${{ inputs.title-types }}
+        INPUT_TITLE_PATTERN: ${{ inputs.title-pattern }}
+        INPUT_REQUIRED_SECTIONS: ${{ inputs.required-sections }}
+        INPUT_TARGET_BRANCH: ${{ inputs.target-branch }}
+        INPUT_SKIP_USERS: ${{ inputs.skip-users }}
+        INPUT_SKIP_DESCRIPTION_BRANCHES: ${{ inputs.skip-description-branches }}
+      with:
+        script: |
+          const pr = context.payload.pull_request;
+          if (!pr) {
+            core.warning('Not a pull_request event — skipping PR validation');
+            return;
+          }
+
+          // Check skip-users allowlist
+          const skipUsers = process.env.INPUT_SKIP_USERS
+            .split(',').map(s => s.trim()).filter(Boolean);
+          if (skipUsers.includes(pr.user.login)) {
+            core.info(`Skipping validation for allowlisted user: ${pr.user.login}`);
+            return;
+          }
+
+          const errors = [];
+
+          // 1. Base branch check
+          const targetBranch = process.env.INPUT_TARGET_BRANCH.trim();
+          if (targetBranch && pr.base.ref !== targetBranch) {
+            errors.push(`PRs must target '${targetBranch}' branch, not '${pr.base.ref}'`);
+          }
+
+          // 2. Title validation
+          const titleTypes = process.env.INPUT_TITLE_TYPES
+            .split(',').map(s => s.trim()).filter(Boolean);
+          const customPattern = process.env.INPUT_TITLE_PATTERN.trim();
+
+          if (customPattern) {
+            const re = new RegExp(customPattern);
+            if (!re.test(pr.title)) {
+              errors.push(`PR title does not match required pattern: ${customPattern}`);
+            }
+          } else {
+            // Default: conventional commit format — type(scope)?: subject
+            const typesGroup = titleTypes.join('|');
+            const re = new RegExp(`^(${typesGroup})(\\([\\w-]+\\))?!?:\\s+.+$`);
+            if (!re.test(pr.title)) {
+              errors.push(
+                `PR title must follow conventional commit format: type(scope): description\n` +
+                `Allowed types: ${titleTypes.join(', ')}`
+              );
+            }
+          }
+
+          // 3. Required description sections
+          const requiredSections = process.env.INPUT_REQUIRED_SECTIONS
+            .split(',').map(s => s.trim()).filter(Boolean);
+
+          if (requiredSections.length > 0) {
+            // Check branch prefix skip list
+            const skipBranches = process.env.INPUT_SKIP_DESCRIPTION_BRANCHES
+              .split(',').map(s => s.trim()).filter(Boolean);
+            const headRef = pr.head?.ref || '';
+            const shouldSkipDescription = skipBranches.some(prefix => headRef.startsWith(prefix));
+
+            if (shouldSkipDescription) {
+              core.info(`Skipping description validation for branch: ${headRef}`);
+            } else {
+              const body = pr.body || '';
+              const missing = requiredSections.filter(s => !body.includes(s));
+              if (missing.length > 0) {
+                errors.push(
+                  `PR description missing required sections: ${missing.join(', ')}\n` +
+                  `Please use the PR template.`
+                );
+              }
+            }
+          }
+
+          // Report results
+          if (errors.length > 0) {
+            core.setFailed(errors.join('\n\n'));
+          } else {
+            core.info('PR validation passed');
+          }
