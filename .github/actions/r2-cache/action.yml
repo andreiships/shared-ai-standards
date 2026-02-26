@@ -26,6 +26,10 @@ inputs:
     description: 'Axiom API token for telemetry (optional, skipped if empty)'
     required: false
     default: ''
+  metrics-script:
+    description: 'Path to telemetry script relative to $GITHUB_WORKSPACE (e.g. scripts/ci/r2-cache-metrics.sh). Must define emit_r2_cache_event and get_millis. Only sourced when axiom-token is also set.'
+    required: false
+    default: ''
 
 outputs:
   cache-hit:
@@ -48,6 +52,7 @@ runs:
         CACHE_TOKEN: ${{ inputs.cache-token }}
         CACHE_API: ${{ inputs.cache-api }}
         AXIOM_TOKEN: ${{ inputs.axiom-token }}
+        METRICS_SCRIPT: ${{ inputs.metrics-script }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
@@ -57,7 +62,19 @@ runs:
         # Source retry helper (bundled with action)
         source "${ACTION_PATH}/curl-retry.sh"
 
-        # Telemetry helpers (fail-soft — callers can source their own metrics script before this action)
+        # Source telemetry script if provided (fail-soft)
+        if [ -n "$AXIOM_TOKEN" ] && [ -n "$METRICS_SCRIPT" ]; then
+          if [[ "$METRICS_SCRIPT" == *".."* ]]; then
+            echo "::error title=Invalid metrics-script::metrics-script path cannot contain '..'"
+            exit 1
+          fi
+          METRICS_SCRIPT_ABS="$GITHUB_WORKSPACE/$METRICS_SCRIPT"
+          if [ -f "$METRICS_SCRIPT_ABS" ]; then
+            source "$METRICS_SCRIPT_ABS"
+          else
+            echo "::warning title=Metrics Script Not Found::metrics-script '$METRICS_SCRIPT' not found at '$METRICS_SCRIPT_ABS' — telemetry skipped"
+          fi
+        fi
         _emit() { command -v emit_r2_cache_event >/dev/null 2>&1 && emit_r2_cache_event "$@" || true; }
         _millis() { command -v get_millis >/dev/null 2>&1 && get_millis || python3 -c 'import time; print(int(time.time() * 1000))' || echo 0; }
 
@@ -159,6 +176,7 @@ runs:
         CACHE_TOKEN: ${{ inputs.cache-token }}
         CACHE_API: ${{ inputs.cache-api }}
         AXIOM_TOKEN: ${{ inputs.axiom-token }}
+        METRICS_SCRIPT: ${{ inputs.metrics-script }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
@@ -167,7 +185,19 @@ runs:
         # Source retry helper (bundled with action)
         source "${ACTION_PATH}/curl-retry.sh"
 
-        # Telemetry helpers (fail-soft — callers can source their own metrics script before this action)
+        # Source telemetry script if provided (fail-soft)
+        if [ -n "$AXIOM_TOKEN" ] && [ -n "$METRICS_SCRIPT" ]; then
+          if [[ "$METRICS_SCRIPT" == *".."* ]]; then
+            echo "::error title=Invalid metrics-script::metrics-script path cannot contain '..'"
+            exit 1
+          fi
+          METRICS_SCRIPT_ABS="$GITHUB_WORKSPACE/$METRICS_SCRIPT"
+          if [ -f "$METRICS_SCRIPT_ABS" ]; then
+            source "$METRICS_SCRIPT_ABS"
+          else
+            echo "::warning title=Metrics Script Not Found::metrics-script '$METRICS_SCRIPT' not found at '$METRICS_SCRIPT_ABS' — telemetry skipped"
+          fi
+        fi
         _emit() { command -v emit_r2_cache_event >/dev/null 2>&1 && emit_r2_cache_event "$@" || true; }
         _millis() { command -v get_millis >/dev/null 2>&1 && get_millis || python3 -c 'import time; print(int(time.time() * 1000))' || echo 0; }
 
