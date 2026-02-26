@@ -6,7 +6,7 @@ inputs:
     description: 'Comma-separated allowed conventional commit types'
     default: 'feat,fix,docs,chore,refactor,test,ci,perf,style,build,revert'
   title-pattern:
-    description: 'Override regex for title validation (must have named group "type")'
+    description: 'Override regex for title validation'
     default: ''
   required-sections:
     description: 'Comma-separated required heading sections (e.g. "## Summary,## Changes")'
@@ -63,7 +63,13 @@ runs:
           const customPattern = process.env.INPUT_TITLE_PATTERN.trim();
 
           if (customPattern) {
-            const re = new RegExp(customPattern);
+            let re;
+            try {
+              re = new RegExp(customPattern);
+            } catch (e) {
+              core.setFailed(`Invalid title-pattern regex: ${e.message}`);
+              return;
+            }
             if (!re.test(pr.title)) {
               errors.push(`PR title does not match required pattern: ${customPattern}`);
             }
@@ -94,7 +100,10 @@ runs:
               core.info(`Skipping description validation for branch: ${headRef}`);
             } else {
               const body = pr.body || '';
-              const missing = requiredSections.filter(s => !body.includes(s));
+              const bodyLines = body.split('\n');
+              const missing = requiredSections.filter(s =>
+                !bodyLines.some(line => line.startsWith(s))
+              );
               if (missing.length > 0) {
                 errors.push(
                   `PR description missing required sections: ${missing.join(', ')}\n` +
