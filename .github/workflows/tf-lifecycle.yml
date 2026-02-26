@@ -92,6 +92,9 @@ jobs:
     name: Plan
     runs-on: ubicloud-standard-2
     timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
     # Optional environment for accessing environment-scoped secrets
     environment: ${{ inputs.plan_environment }}
 
@@ -201,6 +204,9 @@ jobs:
     if: github.ref == format('refs/heads/{0}', inputs.apply_branch) && needs.plan.outputs.exitcode == '2' && (inputs.caller_event_name == 'push' || inputs.caller_event_name == 'workflow_dispatch')
     runs-on: ubicloud-standard-2
     timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
     environment: ${{ inputs.environment }}
 
     permissions:
