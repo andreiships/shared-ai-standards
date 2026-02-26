@@ -1,0 +1,53 @@
+name: 'Terraform Plan Comment'
+description: 'Post Terraform plan output to PR with smart collapsing for worker code-only changes'
+
+inputs:
+  plan_file_path:
+    description: 'Path to Terraform plan output file'
+    required: true
+  exitcode:
+    description: 'Plan exit code (0=no changes, 1=error, 2=changes)'
+    required: true
+  marker:
+    description: 'Unique comment marker for this TF module (e.g., <!-- terraform-module-plan-comment -->)'
+    required: true
+  module_name:
+    description: 'Display name for the module (e.g., cloudflare-workers)'
+    required: true
+  enable_collapse:
+    description: 'Enable collapse for worker code-only changes'
+    required: false
+    default: 'false'
+  github_token:
+    description: 'GitHub token for API calls'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Post Plan to PR
+      uses: actions/github-script@v7
+      env:
+        PLAN_FILE_PATH: ${{ inputs.plan_file_path }}
+        EXITCODE: ${{ inputs.exitcode }}
+        MARKER: ${{ inputs.marker }}
+        MODULE_NAME: ${{ inputs.module_name }}
+        ENABLE_COLLAPSE: ${{ inputs.enable_collapse }}
+        ACTOR: ${{ github.actor }}
+        ACTION_PATH: ${{ github.action_path }}
+      with:
+        github-token: ${{ inputs.github_token }}
+        script: |
+          const path = require('path');
+          const scriptPath = path.join(process.env.ACTION_PATH, 'format-plan-comment.js');
+          const { default: formatComment } = await import(scriptPath);
+          await formatComment({
+            github,
+            context,
+            planFilePath: process.env.PLAN_FILE_PATH,
+            exitcode: process.env.EXITCODE,
+            marker: process.env.MARKER,
+            moduleName: process.env.MODULE_NAME,
+            enableCollapse: process.env.ENABLE_COLLAPSE === 'true',
+            actor: process.env.ACTOR
+          });
