@@ -114,7 +114,7 @@ export default async function formatPlanComment({ github, context, planFilePath,
       issue_number: context.issue.number,
       per_page: 100,
     });
-    const matching = comments.filter(c => c.body.includes(marker));
+    const matching = comments.filter(c => c.body?.includes(marker));
     for (const comment of matching) {
       await github.rest.issues.deleteComment({
         owner: context.repo.owner,
@@ -155,7 +155,7 @@ export default async function formatPlanComment({ github, context, planFilePath,
     issue_number: context.issue.number,
     per_page: 100,
   });
-  const existing = comments.find(c => c.body.includes(marker));
+  const existing = comments.find(c => c.body?.includes(marker));
 
   if (existing) {
     await github.rest.issues.updateComment({
