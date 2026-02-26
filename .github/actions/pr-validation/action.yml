@@ -75,7 +75,8 @@ runs:
             }
           } else {
             // Default: conventional commit format — type(scope)?: subject
-            const typesGroup = titleTypes.join('|');
+            const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const typesGroup = titleTypes.map(escapeRegex).join('|');
             const re = new RegExp(`^(${typesGroup})(\\([\\w-]+\\))?!?:\\s+.+$`);
             if (!re.test(pr.title)) {
               errors.push(
