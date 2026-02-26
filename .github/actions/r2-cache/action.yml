@@ -64,8 +64,16 @@ runs:
 
         # Source telemetry script if provided (fail-soft)
         if [ -n "$AXIOM_TOKEN" ] && [ -n "$METRICS_SCRIPT" ]; then
+          if [[ "$METRICS_SCRIPT" == *".."* ]]; then
+            echo "::error title=Invalid metrics-script::metrics-script path cannot contain '..'"
+            exit 1
+          fi
           METRICS_SCRIPT_ABS="$GITHUB_WORKSPACE/$METRICS_SCRIPT"
-          [ -f "$METRICS_SCRIPT_ABS" ] && source "$METRICS_SCRIPT_ABS" || true
+          if [ -f "$METRICS_SCRIPT_ABS" ]; then
+            source "$METRICS_SCRIPT_ABS"
+          else
+            echo "::warning title=Metrics Script Not Found::metrics-script '$METRICS_SCRIPT' not found at '$METRICS_SCRIPT_ABS' — telemetry skipped"
+          fi
         fi
         _emit() { command -v emit_r2_cache_event >/dev/null 2>&1 && emit_r2_cache_event "$@" || true; }
         _millis() { command -v get_millis >/dev/null 2>&1 && get_millis || python3 -c 'import time; print(int(time.time() * 1000))' || echo 0; }
@@ -179,8 +187,16 @@ runs:
 
         # Source telemetry script if provided (fail-soft)
         if [ -n "$AXIOM_TOKEN" ] && [ -n "$METRICS_SCRIPT" ]; then
+          if [[ "$METRICS_SCRIPT" == *".."* ]]; then
+            echo "::error title=Invalid metrics-script::metrics-script path cannot contain '..'"
+            exit 1
+          fi
           METRICS_SCRIPT_ABS="$GITHUB_WORKSPACE/$METRICS_SCRIPT"
-          [ -f "$METRICS_SCRIPT_ABS" ] && source "$METRICS_SCRIPT_ABS" || true
+          if [ -f "$METRICS_SCRIPT_ABS" ]; then
+            source "$METRICS_SCRIPT_ABS"
+          else
+            echo "::warning title=Metrics Script Not Found::metrics-script '$METRICS_SCRIPT' not found at '$METRICS_SCRIPT_ABS' — telemetry skipped"
+          fi
         fi
         _emit() { command -v emit_r2_cache_event >/dev/null 2>&1 && emit_r2_cache_event "$@" || true; }
         _millis() { command -v get_millis >/dev/null 2>&1 && get_millis || python3 -c 'import time; print(int(time.time() * 1000))' || echo 0; }
