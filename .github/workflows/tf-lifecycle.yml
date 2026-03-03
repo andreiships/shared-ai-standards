@@ -94,22 +94,22 @@ on:
         type: string
         default: 'prod'
       infisical_domain:
-        description: 'Infisical domain URL (defaults to app.infisical.com cloud when empty)'
+        description: 'Infisical domain URL (leave empty for app.infisical.com cloud; set for self-hosted, e.g. https://secrets.example.com)'
         required: false
         type: string
         default: ''
     secrets:
       cloudflare_api_token:
-        required: false  # Not needed by all modules (e.g., observability)
+        required: false  # Not needed by all modules; falls back to Infisical-injected CLOUDFLARE_WORKERS_TOKEN or CLOUDFLARE_INFRA_TOKEN
       plan_encryption_key:
         required: false  # Optional when provided via Infisical injection
       # Module-specific secrets passed through
       additional_tf_vars:
         required: false
       infisical_client_id:
-        required: false
+        required: false  # Required when infisical_project_slug is set
       infisical_client_secret:
-        required: false
+        required: false  # Required when infisical_project_slug is set
 
 jobs:
   plan:
@@ -185,6 +185,7 @@ jobs:
         id: plan
         working-directory: ${{ inputs.working_directory }}
         env:
+          # Precedence: explicit secret → Infisical-injected CLOUDFLARE_WORKERS_TOKEN → Infisical-injected CLOUDFLARE_INFRA_TOKEN
           TF_VAR_cloudflare_api_token: ${{ secrets.cloudflare_api_token || env.CLOUDFLARE_WORKERS_TOKEN || env.CLOUDFLARE_INFRA_TOKEN }}
         run: |
           set -o pipefail
@@ -202,6 +203,7 @@ jobs:
         env:
           PLAN_ENCRYPTION_KEY: ${{ secrets.plan_encryption_key || env.PLAN_ENCRYPTION_KEY }}
         run: |
+          : "${PLAN_ENCRYPTION_KEY:?PLAN_ENCRYPTION_KEY is not set. Pass plan_encryption_key secret or seed PLAN_ENCRYPTION_KEY in Infisical /ci}"
           gpg --symmetric --batch --pinentry-mode loopback \
             --passphrase "$PLAN_ENCRYPTION_KEY" \
             --cipher-algo AES256 \
@@ -311,6 +313,7 @@ jobs:
         env:
           PLAN_ENCRYPTION_KEY: ${{ secrets.plan_encryption_key || env.PLAN_ENCRYPTION_KEY }}
         run: |
+          : "${PLAN_ENCRYPTION_KEY:?PLAN_ENCRYPTION_KEY is not set. Pass plan_encryption_key secret or seed PLAN_ENCRYPTION_KEY in Infisical /ci}"
           gpg --decrypt --batch --pinentry-mode loopback \
             --passphrase "$PLAN_ENCRYPTION_KEY" \
             -o tfplan.binary tfplan.gpg
@@ -318,6 +321,7 @@ jobs:
       - name: Terraform Apply
         working-directory: ${{ inputs.working_directory }}
         env:
+          # Precedence: explicit secret → Infisical-injected CLOUDFLARE_WORKERS_TOKEN → Infisical-injected CLOUDFLARE_INFRA_TOKEN
           TF_VAR_cloudflare_api_token: ${{ secrets.cloudflare_api_token || env.CLOUDFLARE_WORKERS_TOKEN || env.CLOUDFLARE_INFRA_TOKEN }}
         run: terraform apply -input=false tfplan.binary
 
