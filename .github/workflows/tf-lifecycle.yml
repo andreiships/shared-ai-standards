@@ -78,13 +78,37 @@ on:
         required: false
         type: string
         default: 'main'
+      infisical_project_slug:
+        description: 'Infisical project slug — enables Infisical injection when set'
+        required: false
+        type: string
+        default: ''
+      infisical_secret_path:
+        description: 'Infisical secret path'
+        required: false
+        type: string
+        default: '/ci'
+      infisical_env_slug:
+        description: 'Infisical environment slug'
+        required: false
+        type: string
+        default: 'prod'
+      infisical_domain:
+        description: 'Infisical domain URL'
+        required: false
+        type: string
+        default: 'https://secrets.pistachiorama.ai'
     secrets:
       cloudflare_api_token:
         required: false  # Not needed by all modules (e.g., observability)
       plan_encryption_key:
-        required: true
+        required: false  # Optional when provided via Infisical injection
       # Module-specific secrets passed through
       additional_tf_vars:
+        required: false
+      infisical_client_id:
+        required: false
+      infisical_client_secret:
         required: false
 
 jobs:
@@ -128,6 +152,18 @@ jobs:
             echo "$key=$value" >> "$GITHUB_ENV"
           done <<< "$ADDITIONAL_VARS"
 
+      - name: Inject secrets from Infisical
+        if: inputs.infisical_project_slug != ''
+        uses: Infisical/secrets-action@v1.0.15
+        with:
+          method: "universal"
+          client-id: ${{ secrets.infisical_client_id }}
+          client-secret: ${{ secrets.infisical_client_secret }}
+          env-slug: ${{ inputs.infisical_env_slug }}
+          project-slug: ${{ inputs.infisical_project_slug }}
+          secret-path: ${{ inputs.infisical_secret_path }}
+          domain: ${{ inputs.infisical_domain }}
+
       - name: Run pre-plan script
         if: inputs.pre_plan_script != ''
         run: ${{ inputs.pre_plan_script }}
@@ -149,7 +185,7 @@ jobs:
         id: plan
         working-directory: ${{ inputs.working_directory }}
         env:
-          TF_VAR_cloudflare_api_token: ${{ secrets.cloudflare_api_token }}
+          TF_VAR_cloudflare_api_token: ${{ secrets.cloudflare_api_token || env.CLOUDFLARE_WORKERS_TOKEN || env.CLOUDFLARE_INFRA_TOKEN }}
         run: |
           set -o pipefail
           set +e  # Disable exit-on-error to capture terraform exitcode 2 (changes present)
@@ -164,7 +200,7 @@ jobs:
       - name: Encrypt plan artifact
         if: steps.plan.outputs.exitcode == '2'
         env:
-          PLAN_ENCRYPTION_KEY: ${{ secrets.plan_encryption_key }}
+          PLAN_ENCRYPTION_KEY: ${{ secrets.plan_encryption_key || env.PLAN_ENCRYPTION_KEY }}
         run: |
           gpg --symmetric --batch --pinentry-mode loopback \
             --passphrase "$PLAN_ENCRYPTION_KEY" \
@@ -235,6 +271,18 @@ jobs:
             echo "$key=$value" >> "$GITHUB_ENV"
           done <<< "$ADDITIONAL_VARS"
 
+      - name: Inject secrets from Infisical
+        if: inputs.infisical_project_slug != ''
+        uses: Infisical/secrets-action@v1.0.15
+        with:
+          method: "universal"
+          client-id: ${{ secrets.infisical_client_id }}
+          client-secret: ${{ secrets.infisical_client_secret }}
+          env-slug: ${{ inputs.infisical_env_slug }}
+          project-slug: ${{ inputs.infisical_project_slug }}
+          secret-path: ${{ inputs.infisical_secret_path }}
+          domain: ${{ inputs.infisical_domain }}
+
       - name: Run pre-apply script
         if: inputs.pre_apply_script != ''
         run: ${{ inputs.pre_apply_script }}
@@ -261,7 +309,7 @@ jobs:
       - name: Decrypt plan
         working-directory: ${{ inputs.working_directory }}
         env:
-          PLAN_ENCRYPTION_KEY: ${{ secrets.plan_encryption_key }}
+          PLAN_ENCRYPTION_KEY: ${{ secrets.plan_encryption_key || env.PLAN_ENCRYPTION_KEY }}
         run: |
           gpg --decrypt --batch --pinentry-mode loopback \
             --passphrase "$PLAN_ENCRYPTION_KEY" \
@@ -270,7 +318,7 @@ jobs:
       - name: Terraform Apply
         working-directory: ${{ inputs.working_directory }}
         env:
-          TF_VAR_cloudflare_api_token: ${{ secrets.cloudflare_api_token }}
+          TF_VAR_cloudflare_api_token: ${{ secrets.cloudflare_api_token || env.CLOUDFLARE_WORKERS_TOKEN || env.CLOUDFLARE_INFRA_TOKEN }}
         run: terraform apply -input=false tfplan.binary
 
   notify-on-failure:
