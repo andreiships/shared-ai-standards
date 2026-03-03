@@ -94,10 +94,10 @@ on:
         type: string
         default: 'prod'
       infisical_domain:
-        description: 'Infisical domain URL'
+        description: 'Infisical domain URL (defaults to app.infisical.com cloud when empty)'
         required: false
         type: string
-        default: 'https://secrets.pistachiorama.ai'
+        default: ''
     secrets:
       cloudflare_api_token:
         required: false  # Not needed by all modules (e.g., observability)
@@ -162,7 +162,7 @@ jobs:
           env-slug: ${{ inputs.infisical_env_slug }}
           project-slug: ${{ inputs.infisical_project_slug }}
           secret-path: ${{ inputs.infisical_secret_path }}
-          domain: ${{ inputs.infisical_domain }}
+          domain: ${{ inputs.infisical_domain || 'https://app.infisical.com' }}
 
       - name: Run pre-plan script
         if: inputs.pre_plan_script != ''
@@ -281,7 +281,7 @@ jobs:
           env-slug: ${{ inputs.infisical_env_slug }}
           project-slug: ${{ inputs.infisical_project_slug }}
           secret-path: ${{ inputs.infisical_secret_path }}
-          domain: ${{ inputs.infisical_domain }}
+          domain: ${{ inputs.infisical_domain || 'https://app.infisical.com' }}
 
       - name: Run pre-apply script
         if: inputs.pre_apply_script != ''
