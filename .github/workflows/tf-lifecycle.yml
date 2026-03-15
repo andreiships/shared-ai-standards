@@ -98,6 +98,13 @@ on:
         required: false
         type: string
         default: ''
+    outputs:
+      exitcode:
+        description: 'Terraform plan exit code (0=no changes, 2=changes present)'
+        value: ${{ jobs.plan.outputs.exitcode }}
+      start_ms:
+        description: 'Plan job start time in epoch milliseconds, captured after checkout (for deploy metrics duration calculation)'
+        value: ${{ jobs.plan.outputs.start_ms }}
     secrets:
       cloudflare_api_token:
         required: false  # Not needed by all modules; falls back to Infisical-injected CLOUDFLARE_WORKERS_TOKEN or CLOUDFLARE_INFRA_TOKEN
@@ -129,9 +136,14 @@ jobs:
 
     outputs:
       exitcode: ${{ steps.plan.outputs.exitcode }}
+      start_ms: ${{ steps.timing.outputs.start_ms }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Record plan start time
+        id: timing
+        run: echo "start_ms=$(date +%s%3N)" >> "$GITHUB_OUTPUT"
 
       - name: Download build artifacts
         if: inputs.build_artifact_name != ''
