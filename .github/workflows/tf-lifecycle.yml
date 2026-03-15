@@ -103,7 +103,7 @@ on:
         description: 'Terraform plan exit code (0=no changes, 2=changes present)'
         value: ${{ jobs.plan.outputs.exitcode }}
       start_ms:
-        description: 'Workflow start time in epoch milliseconds (for deploy metrics duration calculation)'
+        description: 'Plan job start time in epoch milliseconds, captured after checkout (for deploy metrics duration calculation)'
         value: ${{ jobs.plan.outputs.start_ms }}
     secrets:
       cloudflare_api_token:
@@ -141,7 +141,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Record workflow start time
+      - name: Record plan start time
         id: timing
         run: echo "start_ms=$(python3 -c 'import time; print(int(time.time()*1000))')" >> "$GITHUB_OUTPUT"
 
