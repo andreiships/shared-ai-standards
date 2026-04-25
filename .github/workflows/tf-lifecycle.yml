@@ -336,15 +336,15 @@ jobs:
           # Precedence: explicit secret → Infisical-injected CLOUDFLARE_WORKERS_TOKEN → Infisical-injected CLOUDFLARE_INFRA_TOKEN
           TF_VAR_cloudflare_api_token: ${{ secrets.cloudflare_api_token || env.CLOUDFLARE_WORKERS_TOKEN || env.CLOUDFLARE_INFRA_TOKEN }}
         run: |
-          set +e
+          set +e -o pipefail
           terraform apply -input=false tfplan.binary 2>&1 | tee /tmp/tf-apply.log
-          APPLY_EXIT=$?
+          APPLY_EXIT=${PIPESTATUS[0]}
           set -e
           if [ $APPLY_EXIT -eq 0 ]; then
             echo "Apply succeeded"
           elif grep -q "Provider produced inconsistent result" /tmp/tf-apply.log; then
             echo "::warning::Provider produced inconsistent result — retrying with fresh plan+apply"
-            terraform plan -input=false -out=tfplan-retry.binary
+            terraform plan -input=false -no-color -out=tfplan-retry.binary
             terraform apply -input=false tfplan-retry.binary
           else
             exit $APPLY_EXIT
