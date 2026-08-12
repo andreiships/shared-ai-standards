@@ -352,12 +352,25 @@ SH
   printf '#!/bin/sh\n' > "$HOME/.cargo/bin/worker-build"
   chmod +x "$HOME/.cargo/bin/worker-build"
   export CACHE_PATH="$HOME/.cargo/bin/worker-build"
-  export CACHE_TOKEN="write-token-placeholder"
   export ACTION_PATH="$ACTION_ROOT"
   export CURL_ARGS_LOG="$TEST_ROOT/curl-args"
+  export ACTIONS_ID_TOKEN_REQUEST_URL='https://token.actions.invalid?id=1'
+  export ACTIONS_ID_TOKEN_REQUEST_TOKEN='request-token-placeholder'
+  export CURL_COUNT="$TEST_ROOT/curl-count"
+  printf '0\n' > "$CURL_COUNT"
 
   cat > "$TEST_ROOT/bin/curl" <<'SH'
 #!/usr/bin/env bash
+count=$(( $(cat "$CURL_COUNT") + 1 ))
+printf '%s\n' "$count" > "$CURL_COUNT"
+if [ "$count" -eq 1 ]; then
+  output=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in -o) output="$2"; shift 2 ;; *) shift ;; esac
+  done
+  printf '{"value":"oidc-jwt-placeholder"}' > "$output"
+  exit 0
+fi
 printf '%s\n' "$@" > "$CURL_ARGS_LOG"
 printf '409'
 SH
@@ -370,6 +383,18 @@ SH
   [[ "$output" == *"immutable key conflict"* ]]
   grep -Eq '^X-Cache-SHA256: [0-9a-f]{64}$' "$CURL_ARGS_LOG"
   grep -Fxq 'If-None-Match: *' "$CURL_ARGS_LOG"
+  [ "$(cat "$CURL_COUNT")" = '2' ]
+}
+
+@test "v2 save fails before packing when GitHub OIDC is unavailable" {
+  export CACHE_PATH="$HOME/.cargo/bin/worker-build"
+  export ACTION_PATH="$ACTION_ROOT"
+  unset ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
+
+  run bash "$ACTION_ROOT/cache-v2.sh" save
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"GitHub OIDC permission is required"* ]]
 }
 
 @test "composite exposes additive v2 inputs and dispatches to scripts" {
@@ -377,7 +402,7 @@ SH
 
   grep -q '^  api-version:' "$action"
   grep -q '^  read-token:' "$action"
-  grep -q '^  write-token:' "$action"
+  ! grep -q '^  write-token:' "$action"
   grep -q 'cache-v2.sh.*restore' "$action"
   grep -q 'cache-v2.sh.*save' "$action"
   grep -q "inputs.api-version != 'v1'.*inputs.api-version != 'v2'" "$action"

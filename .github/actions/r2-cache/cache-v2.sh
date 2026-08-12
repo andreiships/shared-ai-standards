@@ -4,7 +4,6 @@ set -euo pipefail
 : "${ACTION_PATH:?ACTION_PATH is required}"
 : "${CACHE_API:?CACHE_API is required}"
 : "${CACHE_KEY:?CACHE_KEY is required}"
-: "${CACHE_TOKEN:?CACHE_TOKEN is required}"
 : "${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}"
 : "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
 
@@ -12,6 +11,38 @@ set -euo pipefail
 source "${ACTION_PATH}/curl-retry.sh"
 
 MAX_COMPRESSED_BYTES=94371840
+OIDC_AUDIENCE=ci-cache.pistachiorama.ai
+
+write_bearer_config() {
+  local token="$1"
+  [[ -n "$token" && "$token" != *$'\n'* && "$token" != *$'\r'* \
+    && "$token" != *'"'* && "$token" != *\\* ]] \
+    || { echo "r2-cache-v2: unsafe bearer framing" >&2; return 1; }
+  printf 'header = "Authorization: Bearer %s"\n' "$token"
+}
+
+github_oidc_token() {
+  : "${ACTIONS_ID_TOKEN_REQUEST_URL:?GitHub OIDC permission is required for v2 save}"
+  : "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?GitHub OIDC permission is required for v2 save}"
+  local response token
+  response="$(mktemp)"
+  trap 'rm -f "$response"' RETURN
+  curl_with_retry -q -sS --config /dev/fd/3 -o "$response" \
+    "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${OIDC_AUDIENCE}" \
+    3< <(write_bearer_config "$ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+  token="$(python3 - "$response" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    value = json.load(source).get("value")
+if not isinstance(value, str) or not value:
+    raise SystemExit(1)
+print(value, end="")
+PY
+)" || { echo "r2-cache-v2: GitHub OIDC response was invalid" >&2; return 1; }
+  write_bearer_config "$token" >/dev/null
+  printf '%s' "$token"
+}
 
 _millis() {
   command -v get_millis >/dev/null 2>&1 && get_millis \
@@ -42,6 +73,7 @@ load_metrics() {
 
 restore_cache() {
   local archive headers http_code expected actual start
+  : "${CACHE_TOKEN:?CACHE_TOKEN is required for v2 restore}"
   [[ ! "${RESTORE_KEYS:-}" =~ [^[:space:]] ]] \
     || { echo "r2-cache-v2: exact cache does not support restore-keys" >&2; return 1; }
   archive="$(mktemp)"
@@ -76,7 +108,7 @@ restore_cache() {
 }
 
 save_cache() {
-  local archive http_code digest size start raw_path
+  local archive http_code digest size start raw_path oidc_token
   local -a pack_paths=()
   archive="$(mktemp)"
   trap 'rm -f "$archive"' RETURN
@@ -84,18 +116,21 @@ save_cache() {
     [[ -n "$raw_path" ]] && pack_paths+=(--path "$raw_path")
   done <<< "${CACHE_PATH:-}"
   [[ ${#pack_paths[@]} -gt 0 ]] || { echo "r2-cache-v2: CACHE_PATH is required" >&2; return 1; }
+  oidc_token="$(github_oidc_token)"
   python3 "$ACTION_PATH/cache-v2-archive.py" pack \
     --archive "$archive" --workspace "$GITHUB_WORKSPACE" --home "$HOME" "${pack_paths[@]}"
   digest="$(sha256_file "$archive")"
   size="$(wc -c < "$archive" | tr -d ' ')"
   start="$(_millis)"
   http_code="$(curl_with_retry -sS -X PUT -o /dev/null -w '%{http_code}' \
-    -H "Authorization: Bearer $CACHE_TOKEN" \
+    --config /dev/fd/3 \
     -H 'Content-Type: application/gzip' \
     -H "Content-Length: $size" \
     -H "X-Cache-SHA256: $digest" \
     -H 'If-None-Match: *' \
-    --data-binary "@$archive" "$CACHE_API/v2/cache/$CACHE_KEY")" || http_code=000
+    --data-binary "@$archive" "$CACHE_API/v2/cache/$CACHE_KEY" \
+    3< <(write_bearer_config "$oidc_token"))" || http_code=000
+  unset oidc_token
   case "$http_code" in
     200|201)
       _emit r2_cache_save "$CACHE_KEY" "$http_code" "$(( $(_millis) - start ))"

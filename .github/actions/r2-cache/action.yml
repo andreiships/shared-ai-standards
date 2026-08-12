@@ -27,10 +27,6 @@ inputs:
     description: 'Read-only bearer token for v2 restore'
     required: false
     default: ''
-  write-token:
-    description: 'Write bearer token for v2 save; supply only to trusted writers'
-    required: false
-    default: ''
   cache-api:
     description: 'Base URL for the R2 cache API'
     required: false
@@ -293,7 +289,6 @@ runs:
       env:
         CACHE_KEY: ${{ inputs.key }}
         CACHE_PATH: ${{ inputs.path }}
-        CACHE_TOKEN: ${{ inputs.write-token }}
         CACHE_API: ${{ inputs.cache-api }}
         AXIOM_TOKEN: ${{ inputs.axiom-token }}
         METRICS_SCRIPT: ${{ inputs.metrics-script }}
