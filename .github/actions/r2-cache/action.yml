@@ -3,7 +3,7 @@ description: 'Restore and save CI caches via the Cloudflare R2 cache Worker v1/v
 
 inputs:
   api-version:
-    description: 'Cache API version: v1 (legacy mutable/prefix cache) or v2 (exact immutable cache)'
+    description: 'Cache API version: v1 (legacy mutable/prefix cache) or v2 (exact immutable cache). V2 save requires the caller to grant permissions: id-token: write.'
     required: false
     default: 'v1'
   action:

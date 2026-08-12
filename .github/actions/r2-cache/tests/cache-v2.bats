@@ -190,6 +190,62 @@ PY
   [ "$(sha256_file "$first")" = "$(sha256_file "$second")" ]
 }
 
+@test "pack deduplicates recursive glob descendants" {
+  mkdir -p "$GITHUB_WORKSPACE/build/nested"
+  printf 'artifact\n' > "$GITHUB_WORKSPACE/build/nested/output.wasm"
+
+  run python3 "$ACTION_ROOT/cache-v2-archive.py" pack \
+    --archive "$TEST_ROOT/glob.tar.gz" --workspace "$GITHUB_WORKSPACE" --home "$HOME" \
+    --path "$GITHUB_WORKSPACE/build/**"
+
+  [ "$status" -eq 0 ]
+  run tar tzf "$TEST_ROOT/glob.tar.gz"
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s\n' "$output" | grep -c 'workspace/build/nested/output.wasm')" -eq 1 ]
+}
+
+@test "pack enforces the restore member and size contract" {
+  mkdir -p "$GITHUB_WORKSPACE/build"
+  printf 'one\n' > "$GITHUB_WORKSPACE/build/one"
+  printf 'two\n' > "$GITHUB_WORKSPACE/build/two"
+
+  run python3 - "$ACTION_ROOT/cache-v2-archive.py" "$TEST_ROOT/limit.tar.gz" \
+    "$GITHUB_WORKSPACE" "$HOME" <<'PY'
+import importlib.util
+from pathlib import Path
+import sys
+
+script, archive, workspace, home = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("cache_v2_archive", script)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+module.MAX_MEMBERS = 2
+module.pack(Path(archive), Path(workspace), Path(home), [str(Path(workspace, "build"))])
+PY
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"too many members"* ]]
+
+  run python3 - "$ACTION_ROOT/cache-v2-archive.py" "$TEST_ROOT/size.tar.gz" \
+    "$GITHUB_WORKSPACE" "$HOME" <<'PY'
+import importlib.util
+from pathlib import Path
+import sys
+
+script, archive, workspace, home = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("cache_v2_archive", script)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(module)
+module.MAX_UNCOMPRESSED_BYTES = 1
+module.pack(Path(archive), Path(workspace), Path(home), [str(Path(workspace, "build/one"))])
+PY
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"exceeds the allowed size"* ]]
+}
+
 @test "restore rejects an existing symlinked parent even within an allowed root" {
   archive="$TEST_ROOT/valid.tar.gz"
   make_archive valid "$archive"
@@ -316,6 +372,13 @@ SH
   export PATH="$TEST_ROOT/bin:$PATH"
   export CACHE_TOKEN="read-token-placeholder"
   export ACTION_PATH="$ACTION_ROOT"
+  export AXIOM_TOKEN="axiom-placeholder"
+  export METRICS_SCRIPT="r2-cache-metrics-test.sh"
+  export METRICS_LOG="$TEST_ROOT/metrics-log"
+  cat > "$GITHUB_WORKSPACE/$METRICS_SCRIPT" <<'SH'
+emit_r2_cache_event() { printf '%s\n' "$1" >> "$METRICS_LOG"; }
+get_millis() { printf '1000\n'; }
+SH
 
   run bash "$ACTION_ROOT/cache-v2.sh" restore
 
@@ -324,6 +387,7 @@ SH
   [ ! -e "$HOME/.cargo/bin/worker-build" ]
   grep -Fxq -- '--max-filesize' "$CURL_ARGS_LOG"
   grep -Fxq '94371840' "$CURL_ARGS_LOG"
+  grep -Fxq 'r2_cache_error' "$METRICS_LOG"
 }
 
 @test "v2 restore rejects prefix fallback without contacting the cache" {
@@ -397,6 +461,62 @@ SH
   [[ "$output" == *"GitHub OIDC permission is required"* ]]
 }
 
+@test "v2 OIDC and upload retries reuse private configs and disable curlrc" {
+  mkdir -p "$HOME/.cargo/bin" "$TEST_ROOT/tmp"
+  printf '#!/bin/sh\n' > "$HOME/.cargo/bin/worker-build"
+  export CACHE_PATH="$HOME/.cargo/bin/worker-build"
+  export CACHE_KEY='namespace/key?#percent%'
+  export ACTION_PATH="$ACTION_ROOT"
+  export ACTIONS_ID_TOKEN_REQUEST_URL='https://token.actions.invalid?id=1'
+  export ACTIONS_ID_TOKEN_REQUEST_TOKEN='request-token-placeholder'
+  export CURL_COUNT="$TEST_ROOT/curl-count"
+  export CURL_LOG="$TEST_ROOT/curl-log"
+  export TMPDIR="$TEST_ROOT/tmp"
+  export CURL_RETRY_BASE_DELAY=0
+  printf '0\n' > "$CURL_COUNT"
+
+  cat > "$TEST_ROOT/bin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+count=$(( $(cat "$CURL_COUNT") + 1 ))
+printf '%s\n' "$count" > "$CURL_COUNT"
+config=''
+output=''
+url=''
+disabled=false
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -q|--disable) disabled=true; shift ;;
+    --config) config="$2"; shift 2 ;;
+    -o) output="$2"; shift 2 ;;
+    http*) url="$1"; shift ;;
+    *) shift ;;
+  esac
+done
+[ "$disabled" = true ]
+[ -s "$config" ]
+[ "$(stat -f '%Lp' "$config" 2>/dev/null || stat -c '%a' "$config")" = '600' ]
+printf '%s %s\n' "$count" "$url" >> "$CURL_LOG"
+if [ "$count" = 1 ] || [ "$count" = 3 ]; then
+  exit 7
+fi
+if [ "$count" = 2 ]; then
+  printf '{"value":"oidc-jwt-placeholder"}' > "$output"
+  exit 0
+fi
+printf '201'
+SH
+  chmod +x "$TEST_ROOT/bin/curl"
+  export PATH="$TEST_ROOT/bin:$PATH"
+
+  run bash "$ACTION_ROOT/cache-v2.sh" save
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$CURL_COUNT")" = '4' ]
+  grep -Fq 'namespace/key%3F%23percent%25' "$CURL_LOG"
+  [ -z "$(find "$TEST_ROOT/tmp" -type f -print -quit)" ]
+}
+
 @test "composite exposes additive v2 inputs and dispatches to scripts" {
   action="$ACTION_ROOT/action.yml"
 
@@ -407,4 +527,5 @@ SH
   grep -q 'cache-v2.sh.*save' "$action"
   grep -q "inputs.api-version != 'v1'.*inputs.api-version != 'v2'" "$action"
   [ "$(grep -c 'CACHE_API_VERSION: v2' "$action")" -eq 2 ]
+  grep -q 'id-token: write' "$action"
 }

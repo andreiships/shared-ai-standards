@@ -120,6 +120,7 @@ def pack(archive: Path, workspace: Path, home: Path, patterns: list[str]) -> Non
             "home": os.open(home, _directory_flags()),
         }
         try:
+            copied_roots: list[Path] = []
             for raw_pattern in patterns:
                 pattern = os.path.expanduser(raw_pattern)
                 matches = sorted(Path(item) for item in glob.glob(pattern, recursive=True))
@@ -129,6 +130,9 @@ def pack(archive: Path, workspace: Path, home: Path, patterns: list[str]) -> Non
                     if source.is_symlink():
                         raise CacheArchiveError(f"unsupported source type: {source}")
                     namespace, relative = _source_namespace(source, workspace, home)
+                    canonical_source = (workspace if namespace == "workspace" else home) / relative
+                    if any(_within(canonical_source, root) for root in copied_roots):
+                        continue
                     destination = staging / namespace / relative
                     parent_fd = _open_directory_at(
                         root_fds[namespace], tuple(relative.parts[:-1]), str(source), create=False
@@ -137,6 +141,8 @@ def pack(archive: Path, workspace: Path, home: Path, patterns: list[str]) -> Non
                         _copy_source_entry(parent_fd, relative.parts[-1], destination)
                     finally:
                         os.close(parent_fd)
+                    if source.is_dir():
+                        copied_roots.append(canonical_source)
                     copied = True
         finally:
             for root_fd in root_fds.values():
@@ -144,6 +150,21 @@ def pack(archive: Path, workspace: Path, home: Path, patterns: list[str]) -> Non
 
         if not copied:
             raise CacheArchiveError("no cache paths matched")
+
+        member_count = 0
+        total_size = 0
+        for namespace in ("workspace", "home"):
+            source = staging / namespace
+            if not source.exists():
+                continue
+            for entry in (source, *source.rglob("*")):
+                member_count += 1
+                if member_count > MAX_MEMBERS:
+                    raise CacheArchiveError("cache source contains too many members")
+                if entry.is_file():
+                    total_size += entry.stat().st_size
+                    if total_size > MAX_UNCOMPRESSED_BYTES:
+                        raise CacheArchiveError("cache source exceeds the allowed size")
 
         archive.parent.mkdir(parents=True, exist_ok=True)
         temporary_archive = archive.with_suffix(f"{archive.suffix}.partial")
