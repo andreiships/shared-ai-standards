@@ -309,7 +309,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 cp "$TEST_ROOT/download.tar.gz" "$output"
-printf 'HTTP/1.1 200 OK\r\nX-Cache-SHA256: %064d\r\n\r\n' 0 > "$headers"
+printf 'HTTP/1.1 200 OK\r\nX-Cache-SHA256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n\r\n' > "$headers"
 SH
   chmod +x "$TEST_ROOT/bin/curl"
   export PATH="$TEST_ROOT/bin:$PATH"
