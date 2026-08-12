@@ -406,4 +406,5 @@ SH
   grep -q 'cache-v2.sh.*restore' "$action"
   grep -q 'cache-v2.sh.*save' "$action"
   grep -q "inputs.api-version != 'v1'.*inputs.api-version != 'v2'" "$action"
+  [ "$(grep -c 'CACHE_API_VERSION: v2' "$action")" -eq 2 ]
 }
