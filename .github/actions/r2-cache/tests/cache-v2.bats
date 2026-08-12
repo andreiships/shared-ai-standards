@@ -310,6 +310,7 @@ while [ "$#" -gt 0 ]; do
 done
 cp "$TEST_ROOT/download.tar.gz" "$output"
 printf 'HTTP/1.1 200 OK\r\nX-Cache-SHA256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n\r\n' > "$headers"
+printf '200'
 SH
   chmod +x "$TEST_ROOT/bin/curl"
   export PATH="$TEST_ROOT/bin:$PATH"
@@ -319,7 +320,6 @@ SH
   run bash "$ACTION_ROOT/cache-v2.sh" restore
 
   [ "$status" -ne 0 ]
-  printf '# restore output: %s\n' "$output" >&3
   [[ "$output" == *"checksum mismatch"* ]]
   [ ! -e "$HOME/.cargo/bin/worker-build" ]
   grep -Fxq -- '--max-filesize' "$CURL_ARGS_LOG"
