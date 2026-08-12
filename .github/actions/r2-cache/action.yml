@@ -280,6 +280,7 @@ runs:
         CACHE_API: ${{ inputs.cache-api }}
         AXIOM_TOKEN: ${{ inputs.axiom-token }}
         METRICS_SCRIPT: ${{ inputs.metrics-script }}
+        CACHE_API_VERSION: v2
         ACTION_PATH: ${{ github.action_path }}
       run: bash "${ACTION_PATH}/cache-v2.sh" restore
 
@@ -292,5 +293,6 @@ runs:
         CACHE_API: ${{ inputs.cache-api }}
         AXIOM_TOKEN: ${{ inputs.axiom-token }}
         METRICS_SCRIPT: ${{ inputs.metrics-script }}
+        CACHE_API_VERSION: v2
         ACTION_PATH: ${{ github.action_path }}
       run: bash "${ACTION_PATH}/cache-v2.sh" save
