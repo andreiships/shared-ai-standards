@@ -495,7 +495,7 @@ while [ "$#" -gt 0 ]; do
 done
 [ "$disabled" = true ]
 [ -s "$config" ]
-[ "$(stat -f '%Lp' "$config" 2>/dev/null || stat -c '%a' "$config")" = '600' ]
+[ "$(stat -c '%a' "$config" 2>/dev/null || stat -f '%Lp' "$config")" = '600' ]
 printf '%s %s\n' "$count" "$url" >> "$CURL_LOG"
 if [ "$count" = 1 ] || [ "$count" = 3 ]; then
   exit 7
