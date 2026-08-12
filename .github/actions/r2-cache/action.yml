@@ -1,7 +1,11 @@
 name: 'R2 Cache'
-description: 'Restore and save CI caches via Cloudflare R2 (turbo-cache worker v1 API)'
+description: 'Restore and save CI caches via the Cloudflare R2 cache Worker v1/v2 APIs'
 
 inputs:
+  api-version:
+    description: 'Cache API version: v1 (legacy mutable/prefix cache) or v2 (exact immutable cache)'
+    required: false
+    default: 'v1'
   action:
     description: 'Cache operation: restore or save'
     required: true
@@ -16,8 +20,17 @@ inputs:
     description: 'Newline-separated glob patterns of paths to cache'
     required: true
   cache-token:
-    description: 'Bearer token for R2 cache API'
-    required: true
+    description: 'Legacy v1 bearer token'
+    required: false
+    default: ''
+  read-token:
+    description: 'Read-only bearer token for v2 restore'
+    required: false
+    default: ''
+  write-token:
+    description: 'Write bearer token for v2 save; supply only to trusted writers'
+    required: false
+    default: ''
   cache-api:
     description: 'Base URL for the R2 cache API'
     required: false
@@ -34,16 +47,23 @@ inputs:
 outputs:
   cache-hit:
     description: 'Whether an exact or prefix cache hit occurred'
-    value: ${{ steps.restore.outputs.cache-hit || 'false' }}
+    value: ${{ steps.restore-v2.outputs.cache-hit || steps.restore.outputs.cache-hit || 'false' }}
   matched-key:
     description: 'The actual cache key that was restored (may differ from input key on prefix match)'
-    value: ${{ steps.restore.outputs.matched-key || '' }}
+    value: ${{ steps.restore-v2.outputs.matched-key || steps.restore.outputs.matched-key || '' }}
 
 runs:
   using: 'composite'
   steps:
+    - name: Validate cache API version
+      if: inputs.api-version != 'v1' && inputs.api-version != 'v2'
+      shell: bash
+      run: |
+        echo "r2-cache: api-version must be v1 or v2" >&2
+        exit 2
+
     - name: Restore cache from R2
-      if: inputs.action == 'restore'
+      if: inputs.api-version != 'v2' && inputs.action == 'restore'
       id: restore
       shell: bash
       env:
@@ -168,7 +188,7 @@ runs:
         echo "cache-hit=false" >> "$GITHUB_OUTPUT"
 
     - name: Save cache to R2
-      if: inputs.action == 'save'
+      if: inputs.api-version != 'v2' && inputs.action == 'save'
       shell: bash
       env:
         CACHE_KEY: ${{ inputs.key }}
@@ -252,3 +272,30 @@ runs:
           echo "::warning::Cache save failed (HTTP $HTTP_CODE)"
           _emit "r2_cache_error" "$CACHE_KEY" "$HTTP_CODE" $(( $(_millis) - T_START ))
         fi
+
+    - name: Restore exact cache from R2 v2
+      if: inputs.api-version == 'v2' && inputs.action == 'restore'
+      id: restore-v2
+      shell: bash
+      env:
+        CACHE_KEY: ${{ inputs.key }}
+        RESTORE_KEYS: ${{ inputs.restore-keys }}
+        CACHE_TOKEN: ${{ inputs.read-token }}
+        CACHE_API: ${{ inputs.cache-api }}
+        AXIOM_TOKEN: ${{ inputs.axiom-token }}
+        METRICS_SCRIPT: ${{ inputs.metrics-script }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "${ACTION_PATH}/cache-v2.sh" restore
+
+    - name: Save exact cache to R2 v2
+      if: inputs.api-version == 'v2' && inputs.action == 'save'
+      shell: bash
+      env:
+        CACHE_KEY: ${{ inputs.key }}
+        CACHE_PATH: ${{ inputs.path }}
+        CACHE_TOKEN: ${{ inputs.write-token }}
+        CACHE_API: ${{ inputs.cache-api }}
+        AXIOM_TOKEN: ${{ inputs.axiom-token }}
+        METRICS_SCRIPT: ${{ inputs.metrics-script }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "${ACTION_PATH}/cache-v2.sh" save

@@ -14,3 +14,11 @@ jobs:
 
       - name: Validate ai-rulez config
         run: npx ai-rulez@3.6.1 validate
+
+      - name: Install Bats
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bats
+
+      - name: Test R2 cache action
+        run: bats .github/actions/r2-cache/tests/cache-v2.bats
