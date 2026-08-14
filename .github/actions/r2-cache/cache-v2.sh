@@ -105,7 +105,7 @@ load_metrics() {
 }
 
 restore_cache() {
-  local archive headers http_code expected actual start cache_key_url
+  local archive headers http_code expected actual size start cache_key_url
   : "${CACHE_TOKEN:?CACHE_TOKEN is required for v2 restore}"
   [[ ! "${RESTORE_KEYS:-}" =~ [^[:space:]] ]] \
     || { echo "r2-cache-v2: exact cache does not support restore-keys" >&2; return 1; }
@@ -142,6 +142,7 @@ restore_cache() {
     echo "r2-cache-v2: checksum mismatch" >&2
     return 1
   }
+  size="$(wc -c < "$archive" | tr -d ' ')"
   if ! python3 "$ACTION_PATH/cache-v2-archive.py" restore \
     --archive "$archive" --workspace "$GITHUB_WORKSPACE" --home "$HOME"; then
     _emit r2_cache_error "$CACHE_KEY" 200 "$(( $(_millis) - start ))"
@@ -149,7 +150,7 @@ restore_cache() {
   fi
   echo "cache-hit=true" >> "$GITHUB_OUTPUT"
   echo "matched-key=$CACHE_KEY" >> "$GITHUB_OUTPUT"
-  _emit r2_cache_restore "$CACHE_KEY" 200 "$(( $(_millis) - start ))" "$CACHE_KEY"
+  _emit r2_cache_restore "$CACHE_KEY" 200 "$(( $(_millis) - start ))" "$CACHE_KEY" "$size"
 }
 
 save_cache() {
@@ -185,7 +186,7 @@ save_cache() {
   rm -f "$upload_config"
   case "$http_code" in
     200|201)
-      _emit r2_cache_save "$CACHE_KEY" "$http_code" "$(( $(_millis) - start ))"
+      _emit r2_cache_save "$CACHE_KEY" "$http_code" "$(( $(_millis) - start ))" "" "$size"
       ;;
     409)
       _emit r2_cache_error "$CACHE_KEY" 409 "$(( $(_millis) - start ))"

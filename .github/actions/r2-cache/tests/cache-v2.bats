@@ -421,15 +421,15 @@ SH
   chmod +x "$TEST_ROOT/bin/curl"
   export PATH="$TEST_ROOT/bin:$PATH"
   cat > "$GITHUB_WORKSPACE/$METRICS_SCRIPT" <<'SH'
-emit_r2_cache_event() { printf '%s\n' "$*" > "$METRICS_LOG"; }
+emit_r2_cache_event() { printf '%s\n' "$@" > "$METRICS_LOG"; }
 get_millis() { printf '1000\n'; }
 SH
 
   run bash "$ACTION_ROOT/cache-v2.sh" restore
 
   [ "$status" -eq 0 ]
-  [ "$(awk '{print $1}' "$METRICS_LOG")" = "r2_cache_restore" ]
-  [ "$(awk '{print $6}' "$METRICS_LOG")" = "$(wc -c < "$archive" | tr -d ' ')" ]
+  [ "$(sed -n '1p' "$METRICS_LOG")" = "r2_cache_restore" ]
+  [ "$(sed -n '6p' "$METRICS_LOG")" = "$(wc -c < "$archive" | tr -d ' ')" ]
 }
 
 @test "v2 restore rejects prefix fallback without contacting the cache" {
@@ -531,15 +531,15 @@ SH
   chmod +x "$TEST_ROOT/bin/curl"
   export PATH="$TEST_ROOT/bin:$PATH"
   cat > "$GITHUB_WORKSPACE/$METRICS_SCRIPT" <<'SH'
-emit_r2_cache_event() { printf '%s\n' "$*" > "$METRICS_LOG"; }
+emit_r2_cache_event() { printf '%s\n' "$@" > "$METRICS_LOG"; }
 get_millis() { printf '1000\n'; }
 SH
 
   run bash "$ACTION_ROOT/cache-v2.sh" save
 
   [ "$status" -eq 0 ]
-  [ "$(awk '{print $1}' "$METRICS_LOG")" = "r2_cache_save" ]
-  [ "$(awk '{print $6}' "$METRICS_LOG")" = "$(cat "$UPLOAD_SIZE_LOG")" ]
+  [ "$(sed -n '1p' "$METRICS_LOG")" = "r2_cache_save" ]
+  [ "$(sed -n '6p' "$METRICS_LOG")" = "$(cat "$UPLOAD_SIZE_LOG")" ]
   [ "$(cat "$UPLOAD_SIZE_LOG")" -gt 0 ]
 }
 
