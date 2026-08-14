@@ -430,6 +430,8 @@ SH
   [ "$status" -eq 0 ]
   [ "$(sed -n '1p' "$METRICS_LOG")" = "r2_cache_restore" ]
   [ "$(sed -n '6p' "$METRICS_LOG")" = "$(wc -c < "$archive" | tr -d ' ')" ]
+  grep -Fxq 'cache-hit=true' "$GITHUB_OUTPUT"
+  grep -Fxq "matched-key=$CACHE_KEY" "$GITHUB_OUTPUT"
 }
 
 @test "v2 restore rejects prefix fallback without contacting the cache" {
