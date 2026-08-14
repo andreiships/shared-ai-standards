@@ -95,6 +95,10 @@ sha256_file() {
   fi
 }
 
+archive_bytes() {
+  wc -c < "$1" | tr -d ' '
+}
+
 load_metrics() {
   [[ -z "${AXIOM_TOKEN:-}" || -z "${METRICS_SCRIPT:-}" ]] && return 0
   [[ "$METRICS_SCRIPT" != *".."* ]] || { echo "r2-cache-v2: invalid metrics-script" >&2; return 1; }
@@ -105,7 +109,7 @@ load_metrics() {
 }
 
 restore_cache() {
-  local archive headers http_code expected actual start cache_key_url
+  local archive headers http_code expected actual size start cache_key_url
   : "${CACHE_TOKEN:?CACHE_TOKEN is required for v2 restore}"
   [[ ! "${RESTORE_KEYS:-}" =~ [^[:space:]] ]] \
     || { echo "r2-cache-v2: exact cache does not support restore-keys" >&2; return 1; }
@@ -142,6 +146,7 @@ restore_cache() {
     echo "r2-cache-v2: checksum mismatch" >&2
     return 1
   }
+  size="$(archive_bytes "$archive")"
   if ! python3 "$ACTION_PATH/cache-v2-archive.py" restore \
     --archive "$archive" --workspace "$GITHUB_WORKSPACE" --home "$HOME"; then
     _emit r2_cache_error "$CACHE_KEY" 200 "$(( $(_millis) - start ))"
@@ -149,7 +154,7 @@ restore_cache() {
   fi
   echo "cache-hit=true" >> "$GITHUB_OUTPUT"
   echo "matched-key=$CACHE_KEY" >> "$GITHUB_OUTPUT"
-  _emit r2_cache_restore "$CACHE_KEY" 200 "$(( $(_millis) - start ))" "$CACHE_KEY"
+  _emit r2_cache_restore "$CACHE_KEY" 200 "$(( $(_millis) - start ))" "$CACHE_KEY" "$size"
 }
 
 save_cache() {
@@ -165,7 +170,7 @@ save_cache() {
   python3 "$ACTION_PATH/cache-v2-archive.py" pack \
     --archive "$archive" --workspace "$GITHUB_WORKSPACE" --home "$HOME" "${pack_paths[@]}"
   digest="$(sha256_file "$archive")"
-  size="$(wc -c < "$archive" | tr -d ' ')"
+  size="$(archive_bytes "$archive")"
   if (( size > MAX_COMPRESSED_BYTES )); then
     echo "r2-cache-v2: compressed cache exceeds the allowed size" >&2
     return 1
@@ -185,7 +190,7 @@ save_cache() {
   rm -f "$upload_config"
   case "$http_code" in
     200|201)
-      _emit r2_cache_save "$CACHE_KEY" "$http_code" "$(( $(_millis) - start ))"
+      _emit r2_cache_save "$CACHE_KEY" "$http_code" "$(( $(_millis) - start ))" "" "$size"
       ;;
     409)
       _emit r2_cache_error "$CACHE_KEY" 409 "$(( $(_millis) - start ))"

@@ -390,6 +390,50 @@ SH
   grep -Fxq 'r2_cache_error' "$METRICS_LOG"
 }
 
+@test "successful v2 restore emits the verified compressed archive size" {
+  archive="$TEST_ROOT/valid.tar.gz"
+  make_archive valid "$archive"
+  export DOWNLOAD_ARCHIVE="$archive"
+  export EXPECTED_DIGEST
+  EXPECTED_DIGEST="$(sha256_file "$archive")"
+  export ACTION_PATH="$ACTION_ROOT"
+  export CACHE_TOKEN="read-token-placeholder"
+  export AXIOM_TOKEN="axiom-placeholder"
+  export METRICS_SCRIPT="r2-cache-metrics-test.sh"
+  export METRICS_LOG="$TEST_ROOT/metrics-log"
+
+  cat > "$TEST_ROOT/bin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+output=''
+headers=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) output="$2"; shift 2 ;;
+    -D) headers="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+cp "$DOWNLOAD_ARCHIVE" "$output"
+printf 'HTTP/1.1 200 OK\r\nX-Cache-SHA256: %s\r\n\r\n' "$EXPECTED_DIGEST" > "$headers"
+printf '200'
+SH
+  chmod +x "$TEST_ROOT/bin/curl"
+  export PATH="$TEST_ROOT/bin:$PATH"
+  cat > "$GITHUB_WORKSPACE/$METRICS_SCRIPT" <<'SH'
+emit_r2_cache_event() { printf '%s\n' "$@" > "$METRICS_LOG"; }
+get_millis() { printf '1000\n'; }
+SH
+
+  run bash "$ACTION_ROOT/cache-v2.sh" restore
+
+  [ "$status" -eq 0 ]
+  [ "$(sed -n '1p' "$METRICS_LOG")" = "r2_cache_restore" ]
+  [ "$(sed -n '6p' "$METRICS_LOG")" = "$(wc -c < "$archive" | tr -d ' ')" ]
+  grep -Fxq 'cache-hit=true' "$GITHUB_OUTPUT"
+  grep -Fxq "matched-key=$CACHE_KEY" "$GITHUB_OUTPUT"
+}
+
 @test "v2 restore rejects prefix fallback without contacting the cache" {
   export CACHE_TOKEN="read-token-placeholder"
   export ACTION_PATH="$ACTION_ROOT"
@@ -448,6 +492,57 @@ SH
   grep -Eq '^X-Cache-SHA256: [0-9a-f]{64}$' "$CURL_ARGS_LOG"
   grep -Fxq 'If-None-Match: *' "$CURL_ARGS_LOG"
   [ "$(cat "$CURL_COUNT")" = '2' ]
+}
+
+@test "successful v2 save emits the uploaded compressed archive size" {
+  mkdir -p "$HOME/.cargo/bin"
+  printf '#!/bin/sh\n' > "$HOME/.cargo/bin/worker-build"
+  chmod +x "$HOME/.cargo/bin/worker-build"
+  export CACHE_PATH="$HOME/.cargo/bin/worker-build"
+  export ACTION_PATH="$ACTION_ROOT"
+  export ACTIONS_ID_TOKEN_REQUEST_URL='https://token.actions.invalid?id=1'
+  export ACTIONS_ID_TOKEN_REQUEST_TOKEN='request-token-placeholder'
+  export AXIOM_TOKEN="axiom-placeholder"
+  export METRICS_SCRIPT="r2-cache-metrics-test.sh"
+  export METRICS_LOG="$TEST_ROOT/metrics-log"
+  export UPLOAD_SIZE_LOG="$TEST_ROOT/upload-size"
+  export CURL_COUNT="$TEST_ROOT/curl-count"
+  printf '0\n' > "$CURL_COUNT"
+
+  cat > "$TEST_ROOT/bin/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+count=$(( $(cat "$CURL_COUNT") + 1 ))
+printf '%s\n' "$count" > "$CURL_COUNT"
+if [ "$count" -eq 1 ]; then
+  output=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in -o) output="$2"; shift 2 ;; *) shift ;; esac
+  done
+  printf '{"value":"oidc-jwt-placeholder"}' > "$output"
+  exit 0
+fi
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --data-binary) wc -c < "${2#@}" | tr -d ' ' > "$UPLOAD_SIZE_LOG"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '201'
+SH
+  chmod +x "$TEST_ROOT/bin/curl"
+  export PATH="$TEST_ROOT/bin:$PATH"
+  cat > "$GITHUB_WORKSPACE/$METRICS_SCRIPT" <<'SH'
+emit_r2_cache_event() { printf '%s\n' "$@" > "$METRICS_LOG"; }
+get_millis() { printf '1000\n'; }
+SH
+
+  run bash "$ACTION_ROOT/cache-v2.sh" save
+
+  [ "$status" -eq 0 ]
+  [ "$(sed -n '1p' "$METRICS_LOG")" = "r2_cache_save" ]
+  [ "$(sed -n '6p' "$METRICS_LOG")" = "$(cat "$UPLOAD_SIZE_LOG")" ]
+  [ "$(cat "$UPLOAD_SIZE_LOG")" -gt 0 ]
 }
 
 @test "v2 save fails before packing when GitHub OIDC is unavailable" {
