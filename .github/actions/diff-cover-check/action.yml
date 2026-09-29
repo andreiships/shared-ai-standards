@@ -18,12 +18,22 @@ inputs:
 runs:
   using: 'composite'
   steps:
+    # `github.action_path` is `<workspace>/./.github/actions/diff-cover-check` when this
+    # action is used as a LOCAL `./` action (e.g. vendored into the calling repo), and
+    # setup-python rejects any `.` or `..` segment in cache-dependency-path ("Relative
+    # pathing '.' and '..' is not allowed"). realpath normalises it; for a remote
+    # action the path has no such segment and this is a no-op.
+    - name: Resolve requirements path
+      id: requirements
+      shell: bash
+      run: echo "path=$(realpath "$GITHUB_ACTION_PATH/requirements.txt")" >> "$GITHUB_OUTPUT"
+
     - name: Setup Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.12'
         cache: 'pip'
-        cache-dependency-path: '${{ github.action_path }}/requirements.txt'
+        cache-dependency-path: ${{ steps.requirements.outputs.path }}
 
     - name: Install diff-cover
       shell: bash
