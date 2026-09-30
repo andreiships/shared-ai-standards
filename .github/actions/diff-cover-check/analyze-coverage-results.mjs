@@ -161,13 +161,27 @@ export async function analyzeCoverageResults({
     };
   }
 
-  const labels = context.payload.pull_request?.labels || [];
-  const hasOverrideLabel = labels.some(l => l.name === 'coverage-override');
   const belowThreshold = coveragePercent < threshold;
 
   if (!belowThreshold) {
     return { shouldFail: false, coveragePercent, telemetryEvents };
   }
+
+  // LIVE labels, not `context.payload.pull_request.labels`: the payload is frozen
+  // when the run starts, so a `coverage-override` label added afterwards -- the
+  // usual way an override is requested -- was invisible until the next push.
+  // Queried only below threshold, so a passing PR makes no extra call. An API
+  // error throws and fails the check, the same fail-closed direction as before.
+  const issueNumber = context.payload.pull_request?.number;
+  const labels = issueNumber
+    ? await github.paginate(github.rest.issues.listLabelsOnIssue, {
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        issue_number: issueNumber,
+        per_page: 100,
+      })
+    : [];
+  const hasOverrideLabel = labels.some(l => l.name === 'coverage-override');
 
   if (hasOverrideLabel) {
     const hasApproval = await checkCodeownersApproval(github, context);
