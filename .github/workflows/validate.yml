@@ -22,3 +22,6 @@ jobs:
 
       - name: Test R2 cache action
         run: bats .github/actions/r2-cache/tests/cache-v2.bats
+
+      - name: Test diff-cover-check action
+        run: node --test .github/actions/diff-cover-check/tests/analyze-coverage-results.test.mjs
