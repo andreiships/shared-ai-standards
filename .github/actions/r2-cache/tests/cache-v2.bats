@@ -714,6 +714,11 @@ SH
 }
 
 @test "v1 save keeps CACHE_TOKEN off argv and still authenticates" {
+  # The save step itself needs bash 4+ (`shopt -s globstar`); runners have bash 5, macOS's
+  # /bin/bash is 3.2.
+  if [ "$(bash -c 'echo "${BASH_VERSINFO[0]}"')" -lt 4 ]; then
+    skip "the v1 save step requires bash 4+ (globstar)"
+  fi
   argv_recording_curl
   mkdir -p "$GITHUB_WORKSPACE/out"
   echo payload > "$GITHUB_WORKSPACE/out/file"
