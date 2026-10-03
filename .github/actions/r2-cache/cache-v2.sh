@@ -109,18 +109,25 @@ load_metrics() {
 }
 
 restore_cache() {
-  local archive headers http_code expected actual size start cache_key_url
+  local archive headers http_code expected actual size start cache_key_url read_config
   : "${CACHE_TOKEN:?CACHE_TOKEN is required for v2 restore}"
   [[ ! "${RESTORE_KEYS:-}" =~ [^[:space:]] ]] \
     || { echo "r2-cache-v2: exact cache does not support restore-keys" >&2; return 1; }
+  # Register each file as soon as it exists, so a later failing mktemp cannot leak it.
   archive="$(mktemp)"
+  TEMP_FILES+=("$archive")
   headers="$(mktemp)"
-  TEMP_FILES+=("$archive" "$headers")
+  TEMP_FILES+=("$headers")
+  read_config="$(mktemp)"
+  TEMP_FILES+=("$read_config")
+  # The read token goes in a private config file, as the OIDC token does for save: never on
+  # curl's argv, and a file (unlike a process substitution) survives curl_with_retry's retries.
+  write_bearer_config_file "$CACHE_TOKEN" "$read_config"
   start="$(_millis)"
   cache_key_url="$(encoded_cache_key)"
   http_code="$(curl_with_retry -q -sS --max-filesize "$MAX_COMPRESSED_BYTES" \
     -D "$headers" -o "$archive" -w '%{http_code}' \
-    -H "Authorization: Bearer $CACHE_TOKEN" "$CACHE_API/v2/cache/$cache_key_url")" || http_code=000
+    --config "$read_config" "$CACHE_API/v2/cache/$cache_key_url")" || http_code=000
   case "$http_code" in
     404)
       echo "cache-hit=false" >> "$GITHUB_OUTPUT"
