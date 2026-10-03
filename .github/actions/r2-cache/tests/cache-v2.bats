@@ -624,3 +624,115 @@ SH
   [ "$(grep -c 'CACHE_API_VERSION: v2' "$action")" -eq 2 ]
   grep -q 'id-token: write' "$action"
 }
+
+# --- The cache token never reaches curl's argv ----------------------------------------------
+#
+# `-H "Authorization: Bearer $CACHE_TOKEN"` puts the token in curl's argv, readable from
+# `ps` / `/proc/<pid>/cmdline` by any other process on the runner while curl runs. The header
+# now travels in a curl config FILE (`--config <file>`, mode 0600 from mktemp). A process
+# substitution would not do here: curl_with_retry re-runs `curl "$@"`, and a `<(…)` can be
+# read only once, so every retry would go out without the header.
+
+# Prints the `run: |` body of the action.yml step named "$1", de-indented, so the composite
+# step can be executed as the runner would.
+step_script() {
+  python3 - "$ACTION_ROOT/action.yml" "$1" <<'PY'
+import sys
+path, name = sys.argv[1:]
+lines = open(path, encoding="utf-8").read().splitlines()
+start = next(i for i, l in enumerate(lines) if l.strip() == f"- name: {name}")
+run = next(i for i in range(start, len(lines)) if lines[i].strip() == "run: |")
+indent = len(lines[run]) - len(lines[run].lstrip()) + 2
+body = []
+for l in lines[run + 1:]:
+    if l.strip() and len(l) - len(l.lstrip()) < indent:
+        break
+    body.append(l[indent:])
+print("\n".join(body))
+PY
+}
+
+# A curl stub that records argv and the contents of any --config, answers --head with 404
+# and a PUT with 201. With CURL_FAIL_FIRST=1 the first call exits 7 (connect failure), which
+# curl_with_retry retries.
+argv_recording_curl() {
+  export CURL_REC="$TEST_ROOT/curl-rec"
+  mkdir -p "$CURL_REC"
+  cat > "$TEST_ROOT/bin/curl" <<'SH'
+#!/usr/bin/env bash
+n=$(( $(cat "$CURL_REC/n" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$CURL_REC/n"
+printf '%s\n' "$@" >> "$CURL_REC/argv"
+prev=''
+for a in "$@"; do
+  if [ "$prev" = '--config' ]; then cat "$a" >> "$CURL_REC/config.$n"; fi
+  prev="$a"
+done
+if [ "${CURL_FAIL_FIRST:-0}" = 1 ] && [ "$n" = 1 ]; then exit 7; fi
+case " $* " in
+  *" --head "*) printf '404' ;;
+  *" PUT "*) printf '201' ;;
+  *) printf '404' ;;
+esac
+SH
+  chmod +x "$TEST_ROOT/bin/curl"
+  export PATH="$TEST_ROOT/bin:$PATH"
+  export CACHE_TOKEN="cache-token-off-argv-$$"
+  export ACTION_PATH="$ACTION_ROOT"
+  export AXIOM_TOKEN='' METRICS_SCRIPT='' RESTORE_KEYS=''
+  export CURL_RETRY_BASE_DELAY=0
+}
+
+@test "action.yml sends no bearer header on curl's argv, and every v1 call uses the config file" {
+  action="$ACTION_ROOT/action.yml"
+  if grep -nE -- '(-H[[:space:]]*|--header[[:space:]]+)"?Authorization:[[:space:]]*Bearer[[:space:]]+\$' "$action"; then
+    echo 'bearer header on curl argv'; false
+  fi
+  [ "$(grep -cF -- '--config "$AUTH_CONFIG"' "$action")" -eq 4 ]
+}
+
+@test "v1 restore keeps CACHE_TOKEN off argv and still authenticates" {
+  argv_recording_curl
+  step_script "Restore cache from R2" > "$TEST_ROOT/restore.sh"
+  run bash "$TEST_ROOT/restore.sh"
+  [ "$status" -eq 0 ]
+  grep -Fxq 'cache-hit=false' "$GITHUB_OUTPUT"
+  # Not a bare `! grep`: bats does not fail a test on a negated command.
+  if grep -qF "$CACHE_TOKEN" "$CURL_REC/argv"; then echo "CACHE_TOKEN is on curl argv"; false; fi
+  grep -Fxq -- "--header \"Authorization: Bearer $CACHE_TOKEN\"" "$CURL_REC/config.1"
+}
+
+@test "v1 restore re-sends the header on a curl_with_retry retry" {
+  argv_recording_curl
+  export CURL_FAIL_FIRST=1
+  step_script "Restore cache from R2" > "$TEST_ROOT/restore.sh"
+  run bash "$TEST_ROOT/restore.sh"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$CURL_REC/n")" -ge 2 ]
+  grep -Fxq -- "--header \"Authorization: Bearer $CACHE_TOKEN\"" "$CURL_REC/config.1"
+  grep -Fxq -- "--header \"Authorization: Bearer $CACHE_TOKEN\"" "$CURL_REC/config.2"
+}
+
+@test "v1 save keeps CACHE_TOKEN off argv and still authenticates" {
+  argv_recording_curl
+  mkdir -p "$GITHUB_WORKSPACE/out"
+  echo payload > "$GITHUB_WORKSPACE/out/file"
+  export CACHE_PATH="out"
+  step_script "Save cache to R2" > "$TEST_ROOT/save.sh"
+  (cd "$GITHUB_WORKSPACE" && bash "$TEST_ROOT/save.sh") > "$TEST_ROOT/save.out" 2>&1 \
+    || { cat "$TEST_ROOT/save.out"; false; }
+  grep -Fq 'Cache saved successfully (HTTP 201)' "$TEST_ROOT/save.out"
+  # Not a bare `! grep`: bats does not fail a test on a negated command.
+  if grep -qF "$CACHE_TOKEN" "$CURL_REC/argv"; then echo "CACHE_TOKEN is on curl argv"; false; fi
+  grep -Fxq -- "--header \"Authorization: Bearer $CACHE_TOKEN\"" "$CURL_REC/config.1"
+}
+
+@test "v2 restore keeps CACHE_TOKEN off argv and still authenticates" {
+  argv_recording_curl
+  run bash "$ACTION_ROOT/cache-v2.sh" restore
+  [ "$status" -eq 0 ]
+  grep -Fxq 'cache-hit=false' "$GITHUB_OUTPUT"
+  # Not a bare `! grep`: bats does not fail a test on a negated command.
+  if grep -qF "$CACHE_TOKEN" "$CURL_REC/argv"; then echo "CACHE_TOKEN is on curl argv"; false; fi
+  grep -Fxq "header = \"Authorization: Bearer $CACHE_TOKEN\"" "$CURL_REC/config.1"
+}
