@@ -780,3 +780,28 @@ SH
   [[ "$output" == *'r2-cache: unsafe bearer framing'* ]]
   [ ! -e "$CURL_REC/n" ]
 }
+
+# restore_cache registers each temp file for cleanup as soon as it exists, so a failing later
+# mktemp (here the third: the bearer config) cannot leak the earlier ones.
+@test "v2 restore leaks no temp file when a later mktemp fails" {
+  argv_recording_curl
+  real_mktemp="$(command -v mktemp)"
+  export MKTEMP_LOG="$TEST_ROOT/mktemp.log" REAL_MKTEMP="$real_mktemp"
+  cat > "$TEST_ROOT/bin/mktemp" <<'SH'
+#!/usr/bin/env bash
+n=$(( $(wc -l < "$MKTEMP_LOG" 2>/dev/null || echo 0) + 1 ))
+if [ "$n" -ge 3 ]; then echo "failed" >> "$MKTEMP_LOG"; exit 1; fi
+path="$("$REAL_MKTEMP" "$@")" || exit 1
+echo "$path" >> "$MKTEMP_LOG"
+printf '%s\n' "$path"
+SH
+  chmod +x "$TEST_ROOT/bin/mktemp"
+  run bash "$ACTION_ROOT/cache-v2.sh" restore
+  [ "$status" -ne 0 ]
+  [ "$(wc -l < "$MKTEMP_LOG")" -eq 3 ]
+  [ ! -e "$CURL_REC/n" ]
+  while IFS= read -r path; do
+    [ "$path" = failed ] && continue
+    if [ -e "$path" ]; then echo "leaked $path"; false; fi
+  done < "$MKTEMP_LOG"
+}

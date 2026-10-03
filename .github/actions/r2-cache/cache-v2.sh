@@ -113,10 +113,13 @@ restore_cache() {
   : "${CACHE_TOKEN:?CACHE_TOKEN is required for v2 restore}"
   [[ ! "${RESTORE_KEYS:-}" =~ [^[:space:]] ]] \
     || { echo "r2-cache-v2: exact cache does not support restore-keys" >&2; return 1; }
+  # Register each file as soon as it exists, so a later failing mktemp cannot leak it.
   archive="$(mktemp)"
+  TEMP_FILES+=("$archive")
   headers="$(mktemp)"
+  TEMP_FILES+=("$headers")
   read_config="$(mktemp)"
-  TEMP_FILES+=("$archive" "$headers" "$read_config")
+  TEMP_FILES+=("$read_config")
   # The read token goes in a private config file, as the OIDC token does for save: never on
   # curl's argv, and a file (unlike a process substitution) survives curl_with_retry's retries.
   write_bearer_config_file "$CACHE_TOKEN" "$read_config"
