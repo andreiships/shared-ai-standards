@@ -72,9 +72,15 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
+        # The token is written inside a quoted curl-config value, where `"` ends it, `\` escapes
+        # and a newline starts a new directive. Refuse such a token, as cache-v2.sh does. (An
+        # empty token stays allowed: cache-token is optional, e.g. on fork PRs without secrets.)
+        [[ "$CACHE_TOKEN" != *$'\n'* && "$CACHE_TOKEN" != *$'\r'* \
+          && "$CACHE_TOKEN" != *'"'* && "$CACHE_TOKEN" != *\\* ]] \
+          || { echo "r2-cache: unsafe bearer framing" >&2; exit 1; }
         TMPFILE=$(mktemp)
+        trap 'rm -f "$TMPFILE" "$TMPFILE.headers" ${AUTH_CONFIG:+"$AUTH_CONFIG"}' EXIT
         AUTH_CONFIG=$(mktemp)
-        trap 'rm -f "$TMPFILE" "$TMPFILE.headers" "$AUTH_CONFIG"' EXIT
         # The bearer header goes in a curl config FILE (mktemp creates it 0600), never on
         # curl's argv, where any process on the runner can read it. Not a `<(…)`:
         # curl_with_retry re-runs curl, and a process substitution can be read only once.
@@ -202,6 +208,10 @@ runs:
       run: |
         set -euo pipefail
         shopt -s globstar nullglob
+        # Same curl-config framing guard as the restore step.
+        [[ "$CACHE_TOKEN" != *$'\n'* && "$CACHE_TOKEN" != *$'\r'* \
+          && "$CACHE_TOKEN" != *'"'* && "$CACHE_TOKEN" != *\\* ]] \
+          || { echo "r2-cache: unsafe bearer framing" >&2; exit 1; }
 
         # Source retry helper (bundled with action)
         source "${ACTION_PATH}/curl-retry.sh"
@@ -251,8 +261,8 @@ runs:
         # Buffer tar to temp file so curl_with_retry can replay on transient failures.
         # Streaming tar|curl cannot be retried (partial body corrupts the upload).
         TMPTAR=$(mktemp)
+        trap 'rm -f "$TMPTAR" ${AUTH_CONFIG:+"$AUTH_CONFIG"}' EXIT
         AUTH_CONFIG=$(mktemp)
-        trap 'rm -f "$TMPTAR" "$AUTH_CONFIG"' EXIT
         tar czf "$TMPTAR" "${PATHS[@]}"
         # Bearer header in a 0600 config file, not argv; a file survives curl_with_retry's retries.
         printf -- '--header "Authorization: Bearer %s"\n' "$CACHE_TOKEN" > "$AUTH_CONFIG"

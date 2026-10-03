@@ -741,3 +741,42 @@ SH
   if grep -qF "$CACHE_TOKEN" "$CURL_REC/argv"; then echo "CACHE_TOKEN is on curl argv"; false; fi
   grep -Fxq "header = \"Authorization: Bearer $CACHE_TOKEN\"" "$CURL_REC/config.1"
 }
+
+# The v1 steps write the token inside a quoted curl-config value, where `"` ends the value,
+# `\` escapes and a newline starts a new directive. Such a token is refused before curl runs,
+# as cache-v2.sh's write_bearer_config does. An empty token stays allowed (cache-token is
+# optional, e.g. on fork PRs without secrets).
+@test "v1 restore refuses a token that would break curl-config framing, before any curl call" {
+  argv_recording_curl
+  step_script "Restore cache from R2" > "$TEST_ROOT/restore.sh"
+  for bad in 'tok"en' 'tok\en' $'tok\nheader = "X-Injected: 1"' $'tok\ren'; do
+    rm -f "$CURL_REC/n"
+    CACHE_TOKEN="$bad" run bash "$TEST_ROOT/restore.sh"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'r2-cache: unsafe bearer framing'* ]]
+    [ ! -e "$CURL_REC/n" ]
+  done
+}
+
+@test "v1 restore still runs with an empty token" {
+  argv_recording_curl
+  step_script "Restore cache from R2" > "$TEST_ROOT/restore.sh"
+  CACHE_TOKEN='' run bash "$TEST_ROOT/restore.sh"
+  [ "$status" -eq 0 ]
+  grep -Fxq 'cache-hit=false' "$GITHUB_OUTPUT"
+}
+
+@test "v1 save refuses a token that would break curl-config framing, before any curl call" {
+  if [ "$(bash -c 'echo "${BASH_VERSINFO[0]}"')" -lt 4 ]; then
+    skip "the v1 save step requires bash 4+ (globstar)"
+  fi
+  argv_recording_curl
+  mkdir -p "$GITHUB_WORKSPACE/out"
+  echo payload > "$GITHUB_WORKSPACE/out/file"
+  export CACHE_PATH="out"
+  step_script "Save cache to R2" > "$TEST_ROOT/save.sh"
+  CACHE_TOKEN='tok"en' run bash -c 'cd "$GITHUB_WORKSPACE" && bash "$1"' _ "$TEST_ROOT/save.sh"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'r2-cache: unsafe bearer framing'* ]]
+  [ ! -e "$CURL_REC/n" ]
+}
